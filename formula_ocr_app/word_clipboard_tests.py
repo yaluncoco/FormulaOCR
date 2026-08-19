@@ -3,20 +3,36 @@ from __future__ import annotations
 from dataclasses import dataclass
 from xml.etree import ElementTree
 
-from formula_ocr_app.formula_formats import (
-    clean_recognized_latex,
-    latex_to_mathml,
-    mathml_to_omml,
-    mathml_to_word_mathml,
-)
-from formula_ocr_app.word_clipboard import (
-    FORMAT_HTML,
-    FORMAT_MATHML,
-    FORMAT_MATHML_PRESENTATION,
-    FORMAT_OFFICE_OPEN_XML,
-    build_word_clipboard_payload,
-    _custom_format_bytes,
-)
+try:
+    from formula_ocr_app.formula_formats import (
+        clean_recognized_latex,
+        latex_to_mathml,
+        mathml_to_omml,
+        mathml_to_word_mathml,
+    )
+    from formula_ocr_app.word_clipboard import (
+        FORMAT_HTML,
+        FORMAT_MATHML,
+        FORMAT_MATHML_PRESENTATION,
+        FORMAT_OFFICE_OPEN_XML,
+        build_word_clipboard_payload,
+        _custom_format_bytes,
+    )
+except ImportError:  # Allows `python formula_ocr_app/app.py`.
+    from formula_formats import (
+        clean_recognized_latex,
+        latex_to_mathml,
+        mathml_to_omml,
+        mathml_to_word_mathml,
+    )
+    from word_clipboard import (
+        FORMAT_HTML,
+        FORMAT_MATHML,
+        FORMAT_MATHML_PRESENTATION,
+        FORMAT_OFFICE_OPEN_XML,
+        build_word_clipboard_payload,
+        _custom_format_bytes,
+    )
 
 
 @dataclass(frozen=True)
@@ -32,6 +48,12 @@ CASES = (
         name="overline",
         latex=r"\overline{K}=C\overline{B}",
         must_contain=('<mover accent="true">', "<mi>―</mi>"),
+    ),
+    WordMathCase(
+        name="argmax_display_limit",
+        latex=r"k^{*}=\arg\max\limits_{k}J(k)",
+        must_contain=("<mo>arg</mo>", "<munder><mo>max</mo>"),
+        must_not_contain=(r"<mi>\arg</mi>", "<msub><mo>max</mo>"),
     ),
     WordMathCase(
         name="two_sums_keep_display_limits",

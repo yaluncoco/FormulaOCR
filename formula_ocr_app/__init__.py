@@ -1,2 +1,3 @@
-"""Lightweight PaddleOCR formula recognition app."""
+"""FormulaOCR desktop application package."""
 
+__version__ = "1.0.0"

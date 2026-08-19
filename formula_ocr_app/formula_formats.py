@@ -185,6 +185,9 @@ def clean_recognized_latex(latex: str) -> str:
         r"\\\1{\2}",
         text,
     )
+    text = _normalize_named_operators(text)
+    text = _normalize_ocr_relation_artifacts(text)
+    text = _normalize_named_operator_limits(text)
     return text.strip()
 
 
@@ -193,6 +196,67 @@ def _normalize_ocr_separator_punctuation(text: str) -> str:
     # Formula OCR often mistakes an argument-separating comma after a subscript
     # group for a prime-like quote. Keep real primes such as f'(x) untouched.
     return re.sub(r"(?<=[}\]])\s*['’‘′‵ʹ]\s*(?=(?:[A-Za-z]|\\[A-Za-z]+))", ",", text)
+
+
+_NAMED_OPERATOR_COMMANDS = {
+    "arg": r"\arg",
+    "max": r"\max",
+    "min": r"\min",
+    "sup": r"\sup",
+    "inf": r"\inf",
+    "lim": r"\lim",
+    "det": r"\det",
+    "gcd": r"\gcd",
+    "log": r"\log",
+    "ln": r"\ln",
+    "exp": r"\exp",
+    "sin": r"\sin",
+    "cos": r"\cos",
+    "tan": r"\tan",
+}
+
+
+def _normalize_named_operators(text: str) -> str:
+    """Turn verbose OCR operator markup into stable standard commands."""
+
+    def _replace(match: re.Match[str]) -> str:
+        name = re.sub(r"\s+", "", match.group(1)).lower()
+        if name in {"argmax", "argmin"}:
+            return "\\arg\\" + name[3:]
+        return _NAMED_OPERATOR_COMMANDS.get(name, match.group(0))
+
+    return re.sub(
+        r"\\operatorname\*?\s*\{\s*([A-Za-z][A-Za-z\s]*?)\s*\}",
+        _replace,
+        text,
+    )
+
+
+def _normalize_ocr_relation_artifacts(text: str) -> str:
+    """Repair high-confidence spacing/equality artifacts emitted by OCR."""
+
+    # A spacing command immediately before an equality sign is visual noise.
+    text = re.sub(r"(?:\\[ ,;:!]\s*)+(?=\\?=)", "", text)
+    # Formula images contain mathematical equality rather than programming
+    # comparisons.  Paddle occasionally emits ``\==`` or ``==`` for one glyph.
+    return re.sub(r"\\?={2,}", "=", text)
+
+
+def _normalize_named_operator_limits(text: str) -> str:
+    r"""Preserve a visibly under-set optimizer variable from formula images.
+
+    Paddle's formula models commonly emit ``\arg\max_{k}`` for a display
+    formula whose ``k`` is centered below ``max``.  The spelling is valid
+    LaTeX, but several downstream converters treat it as an ordinary right
+    subscript.  Adding the explicit ``\limits`` command retains the original
+    two-dimensional layout in the editable result, MathML preview and Word.
+    """
+
+    return re.sub(
+        r"(\\arg\s*\\(?:max|min))(?!\s*\\(?:limits|nolimits))(\s*_)",
+        r"\1\\limits\2",
+        text,
+    )
 
 
 _EMPTY_MATHML = (
@@ -209,10 +273,18 @@ _ENV_FALLBACK = {
 }
 
 
-def _remap_unsupported_envs(text: str) -> str:
+def _prepare_latex2mathml_input(text: str) -> str:
     for bad, good in _ENV_FALLBACK.items():
         text = text.replace(f"\\begin{{{bad}}}", f"\\begin{{{good}}}")
         text = text.replace(f"\\end{{{bad}}}", f"\\end{{{good}}}")
+    # latex2mathml 3.81 renders the standard ``\arg`` command as literal text
+    # instead of a named operator.  Keep canonical LaTeX in the UI, but feed an
+    # equivalent spelling to the converter for correct preview/Word output.
+    text = re.sub(
+        r"\\arg(?![A-Za-z])",
+        lambda _match: r"\operatorname{arg}",
+        text,
+    )
     return text
 
 
@@ -231,7 +303,7 @@ def latex_to_mathml(latex: str) -> str:
         return _EMPTY_MATHML
     if _latex2mathml_convert is not None:
         try:
-            prepared = _remap_unsupported_envs(normalized)
+            prepared = _prepare_latex2mathml_input(normalized)
             mathml = _latex2mathml_convert(prepared, display="block")
             # Guard against any malformed output before handing it downstream.
             ElementTree.fromstring(mathml)
@@ -239,6 +311,26 @@ def latex_to_mathml(latex: str) -> str:
         except Exception:
             pass
     return _latex_to_mathml_legacy(latex)
+
+
+def latex_to_markdown_inline(latex: str) -> str:
+    return f"${normalize_latex(latex)}$"
+
+
+def latex_to_markdown_block(latex: str) -> str:
+    return f"$$\n{normalize_latex(latex)}\n$$"
+
+
+def latex_to_equation_environment(latex: str) -> str:
+    return f"\\begin{{equation}}\n{normalize_latex(latex)}\n\\end{{equation}}"
+
+
+def latex_to_html(latex: str) -> str:
+    mathml = latex_to_mathml(latex)
+    return (
+        '<!doctype html>\n<html><head><meta charset="utf-8"></head>'
+        f"<body>{mathml}</body></html>"
+    )
 
 
 def mathml_to_omml(mathml: str) -> str:

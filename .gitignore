@@ -21,6 +21,8 @@ build/
 build_fixed/
 dist/
 *.spec
+!FormulaOCR.spec
+release-assets/
 
 # Third-party source/vendor trees
 PaddleOCR-main/
@@ -45,3 +47,4 @@ debug_exe_stderr.txt
 Thumbs.db
 .idea/
 .vscode/
+*:Zone.Identifier

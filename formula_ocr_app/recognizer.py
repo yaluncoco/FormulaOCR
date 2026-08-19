@@ -7,7 +7,32 @@ import subprocess
 import sys
 import types
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+try:
+    from formula_ocr_app.model_catalog import DEFAULT_MODEL_ID
+    from formula_ocr_app.model_downloader import (
+        DownloadProgressCallback,
+        ModelDownloadError,
+        ensure_official_model,
+    )
+    from formula_ocr_app.runtime_paths import (
+        is_paddle_model_cached,
+        paddle_runtime_cache_dir,
+        resolve_paddle_model_dir,
+    )
+except ImportError:  # Allows `python formula_ocr_app/app.py`.
+    from model_catalog import DEFAULT_MODEL_ID
+    from model_downloader import (
+        DownloadProgressCallback,
+        ModelDownloadError,
+        ensure_official_model,
+    )
+    from runtime_paths import (
+        is_paddle_model_cached,
+        paddle_runtime_cache_dir,
+        resolve_paddle_model_dir,
+    )
 
 _SUBPROCESS_PATCHED = False
 
@@ -23,14 +48,18 @@ class PaddleFormulaRecognizer:
         self,
         *,
         paddleocr_repo: str | Path,
-        model_name: str = "PP-FormulaNet_plus-S",
+        model_name: str = DEFAULT_MODEL_ID,
         model_dir: str | Path | None = None,
         device: str = "cpu",
+        download_progress_callback: DownloadProgressCallback | None = None,
+        model_ensure: Callable[..., Path] | None = None,
     ) -> None:
         self.paddleocr_repo = Path(paddleocr_repo).expanduser().resolve()
-        self.model_name = model_name.strip() or "PP-FormulaNet_plus-S"
+        self.model_name = model_name.strip() or DEFAULT_MODEL_ID
         self.model_dir = Path(model_dir).expanduser().resolve() if model_dir else None
         self.device = device.strip() if device else "cpu"
+        self.download_progress_callback = download_progress_callback
+        self.model_ensure = model_ensure
         self._model: Any | None = None
 
     def close(self) -> None:
@@ -61,6 +90,32 @@ class PaddleFormulaRecognizer:
         self._patch_subprocess_no_window()
         self._install_optional_download_stubs()
 
+        model_dir = self.model_dir
+        if model_dir is None and self.model_ensure is not None:
+            try:
+                model_dir = self.model_ensure(
+                    self.model_name,
+                    progress_callback=self.download_progress_callback,
+                )
+            except ModelDownloadError as exc:
+                raise PaddleOCRNotReadyError(
+                    "公式模型下载或校验失败。请检查网络连接、磁盘空间，"
+                    "然后重新识别；未完成的下载会在下次继续。"
+                ) from exc
+        if model_dir is None:
+            model_dir = self._cached_model_dir()
+        if model_dir is None:
+            try:
+                model_dir = ensure_official_model(
+                    self.model_name,
+                    progress_callback=self.download_progress_callback,
+                )
+            except ModelDownloadError as exc:
+                raise PaddleOCRNotReadyError(
+                    "公式模型下载或校验失败。请检查网络连接、磁盘空间，"
+                    "然后重新识别；未完成的下载会在下次继续。"
+                ) from exc
+
         try:
             FormulaRecognition = self._load_formula_recognition_class()
         except Exception as exc:  # pragma: no cover - depends on local runtime
@@ -71,10 +126,10 @@ class PaddleFormulaRecognizer:
 
         self._validate_device()
 
-        kwargs: dict[str, Any] = {"model_name": self.model_name}
-        model_dir = self.model_dir or self._cached_model_dir()
-        if model_dir:
-            kwargs["model_dir"] = str(model_dir)
+        kwargs: dict[str, Any] = {
+            "model_name": self.model_name,
+            "model_dir": str(model_dir),
+        }
         if self.device and self.device.lower() != "auto":
             kwargs["device"] = self.device
         if self.device.lower().startswith("cpu"):
@@ -90,17 +145,18 @@ class PaddleFormulaRecognizer:
         try:
             self._model = FormulaRecognition(**kwargs)
         except Exception as exc:  # pragma: no cover - depends on local runtime
+            download_hint = (
+                " 当前模型尚未缓存，请检查网络连接和可用磁盘空间后重试。"
+                if self.model_dir is None and not is_paddle_model_cached(self.model_name)
+                else ""
+            )
             raise PaddleOCRNotReadyError(
-                "Failed to create PaddleOCR FormulaRecognition model. "
-                "Check paddlepaddle/paddlex installation, model name, device, "
-                "and local model directory."
+                "PaddleOCR 公式模型下载或初始化失败。请检查运行依赖、模型名称、"
+                f"计算设备和模型目录。{download_hint}"
             ) from exc
 
     def _configure_runtime_cache(self) -> None:
-        if getattr(sys, "frozen", False):
-            cache_root = Path(sys.executable).resolve().parent / "cache" / "runtime"
-        else:
-            cache_root = Path(__file__).resolve().parent / ".cache" / "runtime"
+        cache_root = paddle_runtime_cache_dir()
         cache_root.mkdir(parents=True, exist_ok=True)
 
         os.environ["PADDLE_PDX_MODEL_SOURCE"] = "BOS"
@@ -118,23 +174,8 @@ class PaddleFormulaRecognizer:
             os.environ.setdefault("USERPROFILE", str(cache_root / "home"))
 
     def _cached_model_dir(self) -> Path | None:
-        cache_home = os.environ.get("PADDLE_PDX_CACHE_HOME")
-        if not cache_home:
-            return None
-        model_dir = Path(cache_home) / "official_models" / self.model_name
-        has_inference_model = (
-            (model_dir / "inference.json").exists()
-            and (model_dir / "inference.yml").exists()
-        )
-        if has_inference_model:
-            return model_dir
-
-        if getattr(sys, "frozen", False):
-            raise PaddleOCRNotReadyError(
-                f"Local model files were not found for {self.model_name}: {model_dir}. "
-                "This offline build only includes cached models. Use the bundled "
-                "PP-FormulaNet_plus-S model or place the model directory manually."
-            )
+        if is_paddle_model_cached(self.model_name):
+            return resolve_paddle_model_dir(self.model_name)
         return None
 
     def _validate_device(self) -> None:

@@ -1,9 +1,14 @@
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$envRoot = "C:\D\anaconda3\envs\formula_ocr"
+$envRoot = if ($env:FORMULA_OCR_CONDA_ENV) {
+    $env:FORMULA_OCR_CONDA_ENV
+} else {
+    "C:\D\anaconda3\envs\formula_ocr"
+}
 $python = Join-Path $envRoot "python.exe"
 $pyinstaller = Join-Path $envRoot "Scripts\pyinstaller.exe"
+$specFile = Join-Path $root "FormulaOCR.spec"
 $iconSvg = Join-Path $root "icon.svg"
 $iconPng = Join-Path $root "icon.png"
 $iconIco = Join-Path $root "icon.ico"
@@ -13,10 +18,19 @@ if (-not (Test-Path $python)) {
 }
 if (-not (Test-Path $pyinstaller)) {
     & $python -m pip install pyinstaller
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to install PyInstaller into $envRoot"
+    }
+}
+if (-not (Test-Path $specFile)) {
+    throw "PyInstaller spec not found: $specFile"
 }
 
 Set-Location $root
-$env:PATH = (Join-Path $envRoot "Library\bin") + ";" + $env:PATH
+$runtimeBin = Join-Path $envRoot "Library\bin"
+if (Test-Path $runtimeBin) {
+    $env:PATH = $runtimeBin + ";" + $env:PATH
+}
 
 function Find-Browser {
     $candidates = @(
@@ -80,79 +94,58 @@ svg{display:block;width:512px;height:512px}
         "--screenshot=$iconPng" `
         $renderUri | Out-Null
 
+    if (-not (Test-Path $iconPng)) {
+        throw "Browser did not produce icon.png"
+    }
     & $python -c "from PIL import Image; img=Image.open(r'$iconPng').convert('RGBA'); img.save(r'$iconIco', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to generate icon.ico"
+    }
+}
+
+function Invoke-PackagedSelfTest {
+    param(
+        [string]$Name,
+        [string]$Argument,
+        [string]$Executable
+    )
+    Write-Host "Running packaged $Name..."
+    & $Executable $Argument
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged $Name failed with exit code $LASTEXITCODE"
+    }
 }
 
 Update-IconAssets
 
-$pyinstallerArgs = @(
-    "--noconfirm",
-    "--clean",
-    "--onedir",
-    "--windowed",
-    "--name", "FormulaOCR",
-    "--contents-directory", "_internal",
-    "--add-data", "$root\PaddleOCR-main\paddleocr;PaddleOCR-main\paddleocr",
-    "--collect-all", "paddle",
-    "--collect-all", "paddlex",
-    "--collect-all", "cv2",
-    "--collect-all", "tokenizers",
-    "--collect-all", "pypdfium2",
-    "--collect-all", "latex2mathml",
-    "--copy-metadata", "tokenizers",
-    "--copy-metadata", "latex2mathml",
-    "--hidden-import", "paddle",
-    "--hidden-import", "paddlex",
-    "--hidden-import", "tokenizers"
-)
-
-if (Test-Path $iconIco) {
-    $pyinstallerArgs += @("--icon", $iconIco)
-}
-if (Test-Path $iconPng) {
-    $pyinstallerArgs += @("--add-data", "$iconPng;.")
-}
-if (Test-Path $iconIco) {
-    $pyinstallerArgs += @("--add-data", "$iconIco;.")
-}
-
-$excludeModules = @(
-    "tensorflow",
-    "torch",
-    "torchvision",
-    "torchaudio",
-    "modelscope",
-    "matplotlib",
-    "sklearn",
-    "scipy",
-    "paddle.tensorrt",
-    "paddlex.inference.serving",
-    "shapely.tests"
-)
-foreach ($module in $excludeModules) {
-    $pyinstallerArgs += @("--exclude-module", $module)
-}
-
-$pyinstallerArgs += "$root\formula_ocr_app\app.py"
-
-& $pyinstaller @pyinstallerArgs
+Write-Host "Building FormulaOCR from: $root"
+Write-Host "Conda environment: $envRoot"
+Write-Host "Package mode: directory (onedir)"
+& $pyinstaller --noconfirm --clean $specFile
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"
 }
 
+$builtExe = Join-Path $root "dist\FormulaOCR\FormulaOCR.exe"
+if (-not (Test-Path $builtExe)) {
+    throw "Built executable not found: $builtExe"
+}
 $internalDir = Join-Path $root "dist\FormulaOCR\_internal"
-Copy-Item -Force (Join-Path $envRoot "Library\bin\tcl86t.dll") (Join-Path $internalDir "tcl86t.dll")
-Copy-Item -Force (Join-Path $envRoot "Library\bin\tk86t.dll") (Join-Path $internalDir "tk86t.dll")
-Copy-Item -Force (Join-Path $envRoot "Library\bin\expat.dll") (Join-Path $internalDir "expat.dll")
-Copy-Item -Force (Join-Path $envRoot "Library\bin\libexpat.dll") (Join-Path $internalDir "libexpat.dll")
-
-$srcModelsRoot = Join-Path $root "formula_ocr_app\.cache\runtime\paddlex\official_models"
-$dstModelsRoot = Join-Path $root "dist\FormulaOCR\cache\runtime\paddlex\official_models"
-if (Test-Path $srcModelsRoot) {
-    New-Item -ItemType Directory -Force -Path $dstModelsRoot | Out-Null
-    Get-ChildItem -LiteralPath $srcModelsRoot -Directory | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $dstModelsRoot $_.Name) -Recurse -Force
-    }
+if (-not (Test-Path $internalDir)) {
+    throw "PyInstaller output directory not found: $internalDir"
 }
 
-Write-Host "Built: $root\dist\FormulaOCR\FormulaOCR.exe"
+Invoke-PackagedSelfTest "runtime boundary self-test" "--runtime-self-test" $builtExe
+Invoke-PackagedSelfTest "UI self-test" "--ui-self-test" $builtExe
+Invoke-PackagedSelfTest "Word/MathML regression" "--word-mathml-self-test" $builtExe
+
+$buildBytes = (
+    Get-ChildItem -LiteralPath (Join-Path $root "dist\FormulaOCR") -Recurse -File |
+        Measure-Object -Property Length -Sum
+).Sum
+$buildMiB = [Math]::Round($buildBytes / 1MB, 1)
+
+Write-Host "Built: $builtExe"
+Write-Host "Package size: $buildMiB MiB"
+Write-Host "Models are downloaded on first use and cached under LocalAppData\FormulaOCR."
+Write-Host "Distribute the complete dist\FormulaOCR directory; the EXE depends on _internal."

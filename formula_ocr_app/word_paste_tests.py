@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree
@@ -202,6 +203,9 @@ def analyze_docx_math(docx_path: Path) -> dict[str, object]:
 
 
 def main() -> None:
+    if sys.platform != "win32":
+        print("word-paste-smoke: skipped on non-Windows")
+        return
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--formula",
