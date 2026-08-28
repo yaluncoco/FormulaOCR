@@ -1,24 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
-import importlib.util
+import importlib.metadata
 import os
 import sys
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import copy_metadata
+
+# Keep headroom for third-party hooks without relying on the interpreter's
+# default recursion limit.
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 5000))
 
 # PyInstaller exposes SPECPATH as the directory containing this spec file,
 # not the spec filename itself. Taking `.parent` here points one directory
 # above the project when the spec is invoked directly.
 ROOT = Path(SPECPATH).resolve()
-paddleocr_spec = importlib.util.find_spec('paddleocr')
-if paddleocr_spec is None or not paddleocr_spec.submodule_search_locations:
-    raise SystemExit('paddleocr==3.6.0 is required to build FormulaOCR.')
-paddleocr_package_dir = Path(
-    next(iter(paddleocr_spec.submodule_search_locations))
-).resolve()
 datas = [
-    (str(paddleocr_package_dir), 'PaddleOCR-main/paddleocr'),
     (str(ROOT / 'icon.png'), '.'),
     (str(ROOT / 'icon.ico'), '.'),
 ]
@@ -93,24 +90,59 @@ for dll_names in (
     )
     if dll_path is not None:
         binaries.append((str(dll_path), '.'))
-hiddenimports = ['paddle', 'paddlex', 'numpy', 'tokenizers', 'onnxruntime', 'rapid_latex_ocr']
-datas += copy_metadata('tokenizers')
-datas += copy_metadata('latex2mathml')
-datas += copy_metadata('paddleocr')
-for package_name in (
-    'paddle',
-    'paddlex',
-    'cv2',
+
+# FormulaOCR loads Paddle's native inference extension directly and does not
+# execute the broad paddle package. Keep only the native CPU files proven by
+# frozen PP-FormulaNet+ L inference; mklml is dynamically loaded and therefore
+# must be listed even though it is not visible in the PE import table.
+paddle_distribution = importlib.metadata.distribution('paddlepaddle')
+paddle_root = Path(paddle_distribution.locate_file('paddle')).resolve()
+libpaddle = next(
+    (
+        path
+        for path in sorted((paddle_root / 'base').glob('libpaddle*'))
+        if path.is_file() and path.suffix.lower() in {'.pyd', '.so', '.dylib'}
+    ),
+    None,
+)
+if libpaddle is None:
+    raise SystemExit('paddlepaddle native inference extension was not found.')
+binaries.append((str(libpaddle), 'paddle/base'))
+required_paddle_libraries = {
+    'common.dll',
+    'libiomp5md.dll',
+    'mkldnn.dll',
+    'mklml.dll',
+    'phi.dll',
+}
+for library_name in sorted(required_paddle_libraries):
+    library_path = paddle_root / 'libs' / library_name
+    if not library_path.is_file():
+        raise SystemExit(f'Required Paddle library was not found: {library_path}')
+    binaries.append((str(library_path), 'paddle/libs'))
+hiddenimports = [
+    'numpy',
     'tokenizers',
-    'pypdfium2',
-    'latex2mathml',
     'onnxruntime',
-    'rapid_latex_ocr',
-):
-    package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
-    datas += package_datas
-    binaries += package_binaries
-    hiddenimports += package_hiddenimports
+    'formula_ocr_app.paddle_formula_recognizer',
+    'formula_ocr_app.model_downloader',
+    'formula_ocr_app.rapid_recognizer',
+    'formula_ocr_app.mathcraft_recognizer',
+    'formula_ocr_app.pix2text_recognizer',
+    'formula_ocr_app.mixtex_recognizer',
+    'formula_ocr_app.unimernet_onnx_recognizer',
+    'formula_ocr_app.rapid_model_downloader',
+    'formula_ocr_app.mathcraft_model_downloader',
+    'formula_ocr_app.pix2text_model_downloader',
+    'formula_ocr_app.mixtex_model_downloader',
+    'formula_ocr_app.unimernet_onnx_model_downloader',
+    'formula_ocr_app.paddle_hf_model_downloader',
+]
+datas += copy_metadata('latex2mathml')
+datas += collect_data_files('latex2mathml', include_py_files=False)
+# Dynamic backend imports must be visible to static analysis. ONNX Runtime's
+# own PyInstaller hook collects the small capi DLL/PYD set; no tools,
+# quantization or transformers modules are needed by this application.
 hiddenimports = list(dict.fromkeys(hiddenimports))
 
 
@@ -123,7 +155,50 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tensorflow', 'torch', 'torchvision', 'torchaudio', 'modelscope', 'matplotlib', 'sklearn', 'scipy', 'paddle.tensorrt', 'paddlex.inference.serving', 'shapely.tests'],
+    excludes=[
+        'tensorflow',
+        'torch',
+        'torchvision',
+        'torchaudio',
+        'modelscope',
+        'matplotlib',
+        'sklearn',
+        'scipy',
+        'paddle',
+        'paddleocr',
+        'paddlex',
+        'cv2',
+        'pypdfium2',
+        'pandas',
+        'filelock',
+        'sqlite3',
+        '_sqlite3',
+        'chardet',
+        'psutil',
+        'setuptools',
+        'coloredlogs',
+        'humanfriendly',
+        'flatbuffers',
+        'sympy',
+        'mpmath',
+        'numpy.testing',
+        'numpy.distutils',
+        'numpy.f2py',
+        'shapely',
+        'rapid_latex_ocr',
+        'onnxruntime.tools',
+        'onnxruntime.quantization',
+        'onnxruntime.transformers',
+        'PIL.AvifImagePlugin',
+        'PIL.FitsImagePlugin',
+        'PIL.FliImagePlugin',
+        'PIL.FpxImagePlugin',
+        'PIL.Hdf5StubImagePlugin',
+        'PIL.MicImagePlugin',
+        'PIL.MpegImagePlugin',
+        'PIL.SpiderImagePlugin',
+        'paddle.tensorrt',
+    ],
     noarchive=False,
     optimize=0,
 )

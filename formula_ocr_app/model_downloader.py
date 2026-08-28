@@ -6,19 +6,41 @@ import tarfile
 import time
 import zlib
 from pathlib import Path
-from typing import Callable
-
-import requests
-from filelock import FileLock
 
 try:
+    from formula_ocr_app.download_utils import (
+        archive_member_name_is_safe,
+        archive_payload_is_within_limits,
+        ensure_safe_directory,
+        recover_model_directory_backup,
+        replace_model_directory,
+    )
+    from formula_ocr_app.interprocess_lock import InterProcessFileLock
+    from formula_ocr_app.model_api import (
+        DownloadProgressCallback,
+        ModelDownloadError,
+    )
     from formula_ocr_app.model_catalog import FormulaModelSpec, get_model_spec
     from formula_ocr_app.runtime_paths import (
         is_paddle_model_cached,
         paddle_model_dir,
         resolve_paddle_model_dir,
     )
-except ImportError:  # Allows `python formula_ocr_app/app.py`.
+except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
+    if exc.name != "formula_ocr_app":
+        raise
+    from download_utils import (
+        archive_member_name_is_safe,
+        archive_payload_is_within_limits,
+        ensure_safe_directory,
+        recover_model_directory_backup,
+        replace_model_directory,
+    )
+    from interprocess_lock import InterProcessFileLock
+    from model_api import (
+        DownloadProgressCallback,
+        ModelDownloadError,
+    )
     from model_catalog import FormulaModelSpec, get_model_spec
     from runtime_paths import (
         is_paddle_model_cached,
@@ -28,17 +50,6 @@ except ImportError:  # Allows `python formula_ocr_app/app.py`.
 
 
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
-
-
-DownloadProgressCallback = Callable[[str, int, int], None]
-
-
-class ModelDownloadError(RuntimeError):
-    pass
-
-
-class ModelDownloadCancelled(RuntimeError):
-    """Internal signal used to stop a download while preserving its partial file."""
 
 
 def ensure_official_model(
@@ -61,10 +72,22 @@ def ensure_official_model(
     destination = paddle_model_dir(model_name)
     models_root = destination.parent
     downloads_dir = models_root / ".downloads"
-    downloads_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        ensure_safe_directory(models_root)
+        ensure_safe_directory(downloads_dir)
+    except OSError as exc:
+        raise ModelDownloadError(f"模型缓存目录不安全：{exc}") from exc
     lock_path = downloads_dir / f"{model_name}.lock"
 
-    with FileLock(str(lock_path)):
+    with InterProcessFileLock(
+        lock_path,
+        on_wait=lambda: _notify(progress_callback, spec, 0),
+    ):
+        recover_model_directory_backup(
+            destination,
+            is_model_valid=_model_files_are_complete,
+            error_type=ModelDownloadError,
+        )
         if is_paddle_model_cached(model_name):
             return resolve_paddle_model_dir(model_name)
 
@@ -82,9 +105,13 @@ def _download_archive(
     archive_path: Path,
     progress_callback: DownloadProgressCallback | None,
 ) -> None:
+    import requests
+
     if _archive_is_valid(archive_path, spec):
         _notify(progress_callback, spec, spec.archive_size)
         return
+    if archive_path.is_symlink():
+        raise ModelDownloadError(f"拒绝覆盖链接模型压缩包：{archive_path}")
     if archive_path.exists():
         archive_path.unlink()
 
@@ -94,6 +121,10 @@ def _download_archive(
     if downloaded:
         headers["Range"] = f"bytes={downloaded}-"
 
+    # Cancellation and the recognition-time no-download guard must run before
+    # requests opens a socket.
+    _notify(progress_callback, spec, downloaded)
+    response = None
     try:
         response = requests.get(
             spec.download_url,
@@ -103,13 +134,33 @@ def _download_archive(
         )
         response.raise_for_status()
     except requests.RequestException as exc:
+        _safe_close_response(response)
         raise ModelDownloadError(f"模型下载失败：{spec.download_url}\n{exc}") from exc
 
     append = downloaded > 0 and response.status_code == 206
+    if append:
+        response_headers = getattr(response, "headers", None)
+        content_range = (
+            response_headers.get("Content-Range", "")
+            if response_headers is not None
+            else ""
+        )
+        if not _content_range_starts_at(content_range, downloaded):
+            _safe_close_response(response)
+            partial_path.unlink(missing_ok=True)
+            # Proxies and mirrors occasionally return a malformed 206 to a
+            # valid Range request. Discard that response and retry from byte
+            # zero once; the removed partial means recursion cannot repeat.
+            return _download_archive(
+                spec,
+                archive_path,
+                progress_callback,
+            )
     if not append:
         downloaded = 0
         checksum = 0
     mode = "ab" if append else "wb"
+    oversized = False
     try:
         last_report = 0.0
         _notify(progress_callback, spec, downloaded)
@@ -117,6 +168,9 @@ def _download_archive(
             for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
                 if not chunk:
                     continue
+                if downloaded + len(chunk) > spec.archive_size:
+                    oversized = True
+                    break
                 file.write(chunk)
                 downloaded += len(chunk)
                 checksum = zlib.crc32(chunk, checksum)
@@ -131,7 +185,11 @@ def _download_archive(
     except OSError as exc:
         raise ModelDownloadError(f"无法写入模型缓存：{partial_path}\n{exc}") from exc
     finally:
-        response.close()
+        _safe_close_response(response)
+
+    if oversized:
+        partial_path.unlink(missing_ok=True)
+        raise ModelDownloadError("模型服务器返回的数据超过压缩包声明大小")
 
     checksum &= 0xFFFFFFFF
     if downloaded != spec.archive_size:
@@ -156,9 +214,13 @@ def _install_archive(
     downloads_dir: Path,
 ) -> None:
     extraction_dir = downloads_dir / f".{spec.model_id}.extracting"
-    if extraction_dir.exists():
+    if extraction_dir.exists() or extraction_dir.is_symlink():
+        if extraction_dir.is_symlink() or not extraction_dir.is_dir():
+            raise ModelDownloadError(
+                f"模型解压缓存不是安全目录：{extraction_dir}"
+            )
         shutil.rmtree(extraction_dir)
-    extraction_dir.mkdir(parents=True)
+    ensure_safe_directory(extraction_dir)
 
     try:
         with tarfile.open(archive_path, mode="r:") as archive:
@@ -174,34 +236,41 @@ def _install_archive(
         # Keep an already working cache until the new archive has been fully
         # extracted and verified.  This matters when a user updates a model
         # while a previous version is still available.
-        backup = destination.with_name(destination.name + ".bak")
-        if backup.exists():
-            shutil.rmtree(backup)
-        if destination.exists():
-            destination.replace(backup)
-        try:
-            shutil.move(str(extracted_model), str(destination))
-        except OSError:
-            if backup.exists() and not destination.exists():
-                backup.replace(destination)
-            raise
-        if backup.exists():
-            shutil.rmtree(backup)
+        replace_model_directory(
+            extracted_model,
+            destination,
+            is_model_valid=_model_files_are_complete,
+            error_type=ModelDownloadError,
+        )
     except (OSError, tarfile.TarError) as exc:
         raise ModelDownloadError(f"模型解压失败：{archive_path}\n{exc}") from exc
     finally:
         shutil.rmtree(extraction_dir, ignore_errors=True)
 
-    archive_path.unlink(missing_ok=True)
+    try:
+        archive_path.unlink(missing_ok=True)
+    except OSError:
+        # A locked archive is harmless after a complete model was installed.
+        # It can be reused or removed by a later download attempt.
+        pass
 
 
 def _archive_is_valid(path: Path, spec: FormulaModelSpec) -> bool:
-    if not path.is_file() or path.stat().st_size != spec.archive_size:
+    try:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size != spec.archive_size
+        ):
+            return False
+        return _crc32_file(path) == spec.archive_crc32
+    except OSError:
         return False
-    return _crc32_file(path) == spec.archive_crc32
 
 
 def _partial_state(path: Path, spec: FormulaModelSpec) -> tuple[int, int]:
+    if path.is_symlink():
+        raise ModelDownloadError(f"拒绝写入链接断点文件：{path}")
     if not path.is_file():
         return 0, 0
     size = path.stat().st_size
@@ -220,32 +289,32 @@ def _crc32_file(path: Path) -> int:
 
 
 def _validate_tar_members(members: list[tarfile.TarInfo]) -> None:
+    if not archive_payload_is_within_limits(
+        len(members),
+        sum(max(0, member.size) for member in members),
+    ):
+        raise ModelDownloadError("模型压缩包解压规模超过安全上限")
     for member in members:
         # Tar names are POSIX-like, but a crafted archive can contain
         # backslashes.  Normalize them before checking so the same archive
         # cannot be safe on Linux and escape its destination on Windows.
-        normalized_name = member.name.replace("\\", "/")
-        member_path = Path(normalized_name)
-        has_windows_drive = (
-            len(normalized_name) >= 2 and normalized_name[1] == ":"
-        )
-        if (
-            not normalized_name
-            or "\x00" in normalized_name
-            or member_path.is_absolute()
-            or has_windows_drive
-            or ".." in member_path.parts
-        ):
+        if not archive_member_name_is_safe(member.name):
             raise ModelDownloadError(f"模型压缩包包含不安全路径：{member.name}")
         if not (member.isdir() or member.isfile()):
             raise ModelDownloadError(f"模型压缩包包含不支持的条目：{member.name}")
 
 
 def _model_files_are_complete(model_dir: Path) -> bool:
-    return all(
-        (model_dir / name).is_file()
-        for name in ("inference.json", "inference.yml", "inference.pdiparams")
-    )
+    try:
+        if model_dir.is_symlink() or not model_dir.is_dir():
+            return False
+        for name in ("inference.json", "inference.yml", "inference.pdiparams"):
+            path = model_dir / name
+            if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+                return False
+        return True
+    except OSError:
+        return False
 
 
 def _notify(
@@ -255,3 +324,20 @@ def _notify(
 ) -> None:
     if callback is not None:
         callback(spec.model_id, min(downloaded, spec.archive_size), spec.archive_size)
+
+
+def _content_range_starts_at(value: str, offset: int) -> bool:
+    prefix = "bytes "
+    if not value.lower().startswith(prefix):
+        return False
+    start_text = value[len(prefix) :].split("-", 1)[0].strip()
+    return start_text.isdigit() and int(start_text) == offset
+
+
+def _safe_close_response(response: object | None) -> None:
+    if response is None:
+        return
+    try:
+        response.close()  # type: ignore[attr-defined]
+    except Exception:
+        pass

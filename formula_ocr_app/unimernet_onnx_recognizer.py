@@ -5,12 +5,21 @@ from pathlib import Path
 from typing import Any, Callable
 
 try:
-    from formula_ocr_app.model_downloader import DownloadProgressCallback
+    from formula_ocr_app.image_utils import load_rgb_image
+    from formula_ocr_app.model_api import DownloadProgressCallback
+    from formula_ocr_app.onnx_runtime import (
+        create_inference_session,
+        repeated_token_suffix_start,
+    )
     from formula_ocr_app.unimernet_onnx_model_downloader import (
         ensure_unimernet_onnx_model,
     )
-except ImportError:  # Allows `python formula_ocr_app/app.py`.
-    from model_downloader import DownloadProgressCallback
+except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
+    if exc.name != "formula_ocr_app":
+        raise
+    from image_utils import load_rgb_image
+    from model_api import DownloadProgressCallback
+    from onnx_runtime import create_inference_session, repeated_token_suffix_start
     from unimernet_onnx_model_downloader import ensure_unimernet_onnx_model
 
 
@@ -99,19 +108,24 @@ class UniMERNetSmallFormulaRecognizer:
         model_dir = self._model_ensure(
             progress_callback=self.download_progress_callback,
         )
-        providers = _onnx_providers(ort, self.device)
         try:
-            encoder_session = ort.InferenceSession(
-                str(model_dir / "encoder_model_quantized.onnx"),
-                providers=providers,
+            encoder_session = create_inference_session(
+                ort,
+                model_dir / "encoder_model_quantized.onnx",
+                device=self.device,
+                error_type=UniMERNetONNXRuntimeError,
             )
-            decoder_session = ort.InferenceSession(
-                str(model_dir / "decoder_model_quantized.onnx"),
-                providers=providers,
+            decoder_session = create_inference_session(
+                ort,
+                model_dir / "decoder_model_quantized.onnx",
+                device=self.device,
+                error_type=UniMERNetONNXRuntimeError,
             )
-            decoder_with_past_session = ort.InferenceSession(
-                str(model_dir / "decoder_with_past_model_quantized.onnx"),
-                providers=providers,
+            decoder_with_past_session = create_inference_session(
+                ort,
+                model_dir / "decoder_with_past_model_quantized.onnx",
+                device=self.device,
+                error_type=UniMERNetONNXRuntimeError,
             )
             tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         except Exception as exc:  # pragma: no cover - depends on local runtime
@@ -137,13 +151,12 @@ class UniMERNetSmallFormulaRecognizer:
         width, height = self._input_size()
         mean, std = self._image_normalization()
         try:
-            with Image.open(image_path) as image:
-                image = _resize_to_fit(image.convert("RGB"), width, height)
-                canvas = Image.new("RGB", (width, height), (255, 255, 255))
-                left = (width - image.width) // 2
-                top = (height - image.height) // 2
-                canvas.paste(image, (left, top))
-                pixels = np.asarray(canvas, dtype=np.float32) / 255.0
+            image = _resize_to_fit(load_rgb_image(image_path), width, height)
+            canvas = Image.new("RGB", (width, height), (255, 255, 255))
+            left = (width - image.width) // 2
+            top = (height - image.height) // 2
+            canvas.paste(image, (left, top))
+            pixels = np.asarray(canvas, dtype=np.float32) / 255.0
         except (OSError, ValueError) as exc:
             raise UniMERNetONNXRuntimeError(f"无法读取公式图片：{image_path}") from exc
 
@@ -219,8 +232,12 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _resize_to_fit(image: Any, width: int, height: int) -> Any:
     from PIL import Image
 
-    if image.width <= width and image.height <= height:
+    if image.width == width and image.height == height:
         return image
+    # VariableDonutImageProcessor scales both small and large inputs to use the
+    # available canvas while preserving aspect ratio, then centers white
+    # padding. Leaving small screenshots at native size makes symbols occupy
+    # only a tiny fraction of the encoder input and sharply reduces accuracy.
     scale = min(width / max(image.width, 1), height / max(image.height, 1))
     resized_size = (
         max(1, min(width, int(image.width * scale))),
@@ -260,6 +277,18 @@ def _generate_tokens(
         for item in decoder_with_past_session.get_inputs()
         if item.name.startswith("past_key_values.")
     ]
+    past_token_input = next(
+        (
+            item
+            for item in decoder_with_past_session.get_inputs()
+            if item.name == "input_ids"
+        ),
+        None,
+    )
+    if past_token_input is None:
+        raise UniMERNetONNXRuntimeError(
+            "UniMERNet Small ONNX 缓存 decoder 缺少 input_ids 输入。"
+        )
     if not cache_outputs or len(cache_outputs) != len(past_inputs):
         raise UniMERNetONNXRuntimeError(
             "UniMERNet Small ONNX decoder 缺少完整的首次/缓存输入输出。"
@@ -303,7 +332,7 @@ def _generate_tokens(
 
     for _ in range(1, max(1, int(max_new_tokens))):
         inputs: dict[str, Any] = {
-            "input_ids": np.asarray([[next_id]], dtype=np.int64),
+            past_token_input.name: np.asarray([[next_id]], dtype=np.int64),
         }
         inputs.update(cache)
         outputs = decoder_with_past_session.run(None, inputs)
@@ -312,7 +341,15 @@ def _generate_tokens(
         if eos_id is not None and next_id == eos_id:
             break
         generated.append(next_id)
-        if _repeated_token_suffix(generated) is not None:
+        repeated_suffix_start = repeated_token_suffix_start(
+            generated,
+            min_generated_tokens=64,
+            min_repeated_tokens=32,
+            max_period=4,
+            min_repetitions=8,
+        )
+        if repeated_suffix_start is not None:
+            del generated[repeated_suffix_start:]
             break
         for past_input in past_inputs:
             present_name = past_input.name.replace("past_key_values.", "present.", 1)
@@ -335,38 +372,3 @@ def _next_token(logits: Any) -> int:
     import numpy as np
 
     return int(np.argmax(logits[:, -1, :], axis=-1)[0])
-
-
-def _repeated_token_suffix(
-    token_ids: list[int],
-    *,
-    min_generated_tokens: int = 64,
-    min_repeated_tokens: int = 32,
-    max_period: int = 4,
-    min_repetitions: int = 8,
-) -> int | None:
-    count = len(token_ids)
-    if count < min_generated_tokens:
-        return None
-    for period in range(1, max_period + 1):
-        pattern = token_ids[-period:]
-        start = count - period
-        repetitions = 1
-        while start >= period and token_ids[start - period : start] == pattern:
-            start -= period
-            repetitions += 1
-        if repetitions >= min_repetitions and repetitions * period >= min_repeated_tokens:
-            return start + period
-    return None
-
-
-def _onnx_providers(onnxruntime: Any, device: str) -> list[str]:
-    available = set(onnxruntime.get_available_providers())
-    normalized = device.lower()
-    if normalized.startswith("gpu") or normalized.startswith("cuda"):
-        if "CUDAExecutionProvider" not in available:
-            raise UniMERNetONNXRuntimeError(
-                "当前 ONNX Runtime 未提供 CUDAExecutionProvider，请选择 CPU。"
-            )
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    return ["CPUExecutionProvider"]

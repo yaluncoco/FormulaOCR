@@ -12,6 +12,11 @@
 #endif
 #define MyBuildDir MyRepoRoot + "\dist\FormulaOCR"
 #define MyOutputDir MyRepoRoot + "\dist\installer"
+#if GetEnv("FORMULA_OCR_CHINESE_ISL") != ""
+#define MyChineseMessages GetEnv("FORMULA_OCR_CHINESE_ISL")
+#else
+#define MyChineseMessages SourcePath + "ChineseSimplified.isl"
+#endif
 
 [Setup]
 AppId={{A97E48D9-8D25-46E3-9454-7100DF0AB47C}
@@ -42,7 +47,7 @@ SetupLogging=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-Name: "chinesesimplified"; MessagesFile: "{#GetEnv('FORMULA_OCR_CHINESE_ISL')}"
+Name: "chinesesimplified"; MessagesFile: "{#MyChineseMessages}"
 
 [CustomMessages]
 english.UninstallUserData=Also remove downloaded models, settings, cache, and logs from %%LOCALAPPDATA%%\FormulaOCR?

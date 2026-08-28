@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 try:
+    from formula_ocr_app.interprocess_lock import InterProcessFileLock
     from formula_ocr_app.model_catalog import DEFAULT_MODEL_ID, MODEL_BY_ID
     from formula_ocr_app.runtime_paths import user_data_dir
-except ImportError:  # Allows `python formula_ocr_app/app.py`.
+except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
+    if exc.name != "formula_ocr_app":
+        raise
+    from interprocess_lock import InterProcessFileLock
     from model_catalog import DEFAULT_MODEL_ID, MODEL_BY_ID
     from runtime_paths import user_data_dir
 
@@ -29,6 +34,8 @@ def load_settings() -> AppSettings:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return AppSettings()
+    if not isinstance(data, dict):
+        return AppSettings()
     model_id = str(data.get("model_id", DEFAULT_MODEL_ID))
     if model_id not in MODEL_BY_ID:
         model_id = DEFAULT_MODEL_ID
@@ -48,9 +55,32 @@ def load_settings() -> AppSettings:
 def save_settings(settings: AppSettings) -> None:
     path = settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(asdict(settings), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    lock_path = path.with_name(f".{path.name}.lock")
+    with InterProcessFileLock(lock_path, poll_interval=0.01):
+        temporary_name = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_name = temporary.name
+                json.dump(
+                    asdict(settings),
+                    temporary,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_name, path)
+            temporary_name = None
+        finally:
+            if temporary_name is not None:
+                try:
+                    Path(temporary_name).unlink(missing_ok=True)
+                except OSError:
+                    pass

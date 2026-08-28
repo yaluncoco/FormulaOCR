@@ -108,33 +108,20 @@ def paddle_model_has_data(model_name: str) -> bool:
 
     if not model_name or Path(model_name).name != model_name:
         return False
-    model_dir = paddle_model_dir(model_name)
-    if model_dir.exists() or model_dir.is_symlink():
-        return True
-
-    downloads_root = model_dir.parent / ".downloads"
-    if any(
-        (downloads_root / filename).exists()
-        or (downloads_root / filename).is_symlink()
-        for filename in (
-            f"{model_name}_infer.tar",
-            f"{model_name}_infer.tar.part",
-            f".{model_name}.extracting",
-        )
-    ):
-        return True
-    # Multi-file Paddle models such as LaTeX_OCR_rec keep resumable files in
-    # a model-scoped directory, matching the ONNX downloaders.
-    partial_dir = downloads_root / model_name
-    return partial_dir.exists() or partial_dir.is_symlink()
+    return any(
+        path.exists() or path.is_symlink()
+        for path in _paddle_user_artifact_paths(model_name)
+    )
 
 
 def paddle_model_cache_size(model_name: str) -> int:
-    model_dir = resolve_paddle_model_dir(model_name)
-    try:
-        return sum(path.stat().st_size for path in model_dir.rglob("*") if path.is_file())
-    except OSError:
-        return 0
+    user_size = sum(
+        _cache_artifact_size(path)
+        for path in _paddle_user_artifact_paths(model_name)
+    )
+    if user_size:
+        return user_size
+    return directory_size(resolve_paddle_model_dir(model_name))
 
 
 def remove_paddle_model(model_name: str) -> bool:
@@ -157,23 +144,36 @@ def remove_paddle_model(model_name: str) -> bool:
         shutil.rmtree(model_dir)
         removed = True
 
+    backup = model_dir.with_name(model_dir.name + ".bak")
+    if backup.exists() or backup.is_symlink():
+        if backup.is_symlink() or not backup.is_dir():
+            raise ValueError(f"模型备份缓存不是安全目录：{backup}")
+        shutil.rmtree(backup)
+        removed = True
+
     downloads_root = model_dir.parent / ".downloads"
     downloads_resolved = downloads_root.resolve()
-    for filename in (
+    artifact_names = (
         f"{model_name}_infer.tar",
         f"{model_name}_infer.tar.part",
         f".{model_name}.extracting",
-    ):
-        artifact = downloads_root / filename
-        if not artifact.exists() and not artifact.is_symlink():
-            continue
-        if artifact.is_symlink() or artifact.resolve().parent != downloads_resolved:
-            raise ValueError(f"拒绝删除非模型下载文件：{artifact}")
-        if artifact.is_dir():
-            shutil.rmtree(artifact)
-        else:
-            artifact.unlink()
-        removed = True
+    )
+    # FormulaOCR 1.0 stored official archives beside the model directories.
+    # Current builds use `.downloads`; clean both layouts so upgrades do not
+    # leave hundreds of megabytes of invisible archives behind.
+    for artifact_root in (downloads_root, model_dir.parent):
+        expected_parent = artifact_root.resolve()
+        for filename in artifact_names:
+            artifact = artifact_root / filename
+            if not artifact.exists() and not artifact.is_symlink():
+                continue
+            if artifact.is_symlink() or artifact.resolve().parent != expected_parent:
+                raise ValueError(f"拒绝删除非模型下载文件：{artifact}")
+            if artifact.is_dir():
+                shutil.rmtree(artifact)
+            else:
+                artifact.unlink()
+            removed = True
 
     partial_dir = downloads_root / model_name
     if partial_dir.exists() or partial_dir.is_symlink():
@@ -188,9 +188,51 @@ def remove_paddle_model(model_name: str) -> bool:
 
 def directory_size(directory: Path) -> int:
     try:
-        return sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
+        if directory.is_symlink() or not directory.is_dir():
+            return 0
+        total = 0
+        for path in directory.rglob("*"):
+            if path.is_symlink() or not path.is_file():
+                continue
+            total += path.stat().st_size
+        return total
     except OSError:
         return 0
+
+
+def _cache_artifact_size(path: Path) -> int:
+    try:
+        if path.is_symlink():
+            return 0
+        if path.is_file():
+            return path.stat().st_size
+        if path.is_dir():
+            return directory_size(path)
+    except OSError:
+        pass
+    return 0
+
+
+def _paddle_user_artifact_paths(model_name: str) -> tuple[Path, ...]:
+    model_dir = paddle_model_dir(model_name)
+    models_root = model_dir.parent
+    downloads_root = models_root / ".downloads"
+    names = (
+        f"{model_name}_infer.tar",
+        f"{model_name}_infer.tar.part",
+        f".{model_name}.extracting",
+    )
+    return tuple(
+        dict.fromkeys(
+            (
+                model_dir,
+                model_dir.with_name(model_dir.name + ".bak"),
+                *(downloads_root / name for name in names),
+                downloads_root / model_name,
+                *(models_root / name for name in names),
+            )
+        )
+    )
 
 
 def external_model_has_data(model_name: str) -> bool:
@@ -198,26 +240,21 @@ def external_model_has_data(model_name: str) -> bool:
 
     if not model_name or Path(model_name).name != model_name:
         return False
-    model_dir = external_model_dir(model_name)
-    if model_dir.exists() or model_dir.is_symlink():
-        return True
+    return any(
+        path.exists() or path.is_symlink()
+        for path in _external_user_artifact_paths(model_name)
+    )
 
-    downloads_root = model_dir.parent / ".downloads"
-    partial_dir = downloads_root / model_name
-    if partial_dir.exists() or partial_dir.is_symlink():
-        return True
-    if model_name in {"MathCraftFormula", "MixTexZhEn"}:
-        archive_names = (
-            ("mathcraft-formula-rec.zip", "mathcraft-formula-rec.zip.part")
-            if model_name == "MathCraftFormula"
-            else ("MixTeX.zip", "MixTeX.zip.part")
-        )
-        return any(
-            (downloads_root / filename).exists()
-            or (downloads_root / filename).is_symlink()
-            for filename in archive_names
-        )
-    return False
+
+def external_model_cache_size(model_name: str) -> int:
+    user_size = sum(
+        _cache_artifact_size(path)
+        for path in _external_user_artifact_paths(model_name)
+    )
+    if user_size:
+        return user_size
+    bundled = bundled_external_model_dir(model_name)
+    return directory_size(bundled) if bundled is not None else 0
 
 
 def remove_external_model(model_name: str) -> bool:
@@ -235,6 +272,13 @@ def remove_external_model(model_name: str) -> bool:
         if model_dir.is_symlink():
             raise ValueError(f"拒绝删除链接模型缓存路径：{model_dir}")
         shutil.rmtree(resolved)
+        removed = True
+
+    backup = model_dir.with_name(model_dir.name + ".bak")
+    if backup.exists() or backup.is_symlink():
+        if backup.is_symlink() or not backup.is_dir():
+            raise ValueError(f"模型备份缓存不是安全目录：{backup}")
+        shutil.rmtree(backup)
         removed = True
 
     # Multi-file ONNX downloads keep resumable fragments outside the model
@@ -268,7 +312,48 @@ def remove_external_model(model_name: str) -> bool:
                 raise ValueError(f"拒绝删除非模型下载文件：{archive_path}")
             archive_path.unlink()
             removed = True
+    if model_name == "MathCraftFormula" and downloads_root.is_dir():
+        downloads_resolved = downloads_root.resolve()
+        for extraction_dir in downloads_root.glob(".MathCraftFormula-*"):
+            if (
+                extraction_dir.is_symlink()
+                or extraction_dir.resolve().parent != downloads_resolved
+                or not extraction_dir.is_dir()
+            ):
+                raise ValueError(f"拒绝删除非模型解压目录：{extraction_dir}")
+            shutil.rmtree(extraction_dir)
+            removed = True
     return removed
+
+
+def _external_user_artifact_paths(model_name: str) -> tuple[Path, ...]:
+    model_dir = external_model_dir(model_name)
+    downloads_root = model_dir.parent / ".downloads"
+    paths: list[Path] = [
+        model_dir,
+        model_dir.with_name(model_dir.name + ".bak"),
+        downloads_root / model_name,
+    ]
+    if model_name == "MathCraftFormula":
+        paths.extend(
+            downloads_root / filename
+            for filename in (
+                "mathcraft-formula-rec.zip",
+                "mathcraft-formula-rec.zip.part",
+            )
+        )
+        try:
+            paths.extend(downloads_root.glob(".MathCraftFormula-*"))
+        except OSError:
+            pass
+    elif model_name == "MixTexZhEn":
+        # Current MixTeX archives are inside the model-scoped directory above;
+        # these root-level names are retained for FormulaOCR 1.0 upgrades.
+        paths.extend(
+            downloads_root / filename
+            for filename in ("MixTeX.zip", "MixTeX.zip.part")
+        )
+    return tuple(dict.fromkeys(paths))
 
 
 def user_data_dir() -> Path:
@@ -326,7 +411,13 @@ def _path_is_within(path: Path, parent: Path) -> bool:
 
 
 def _paddle_model_files_exist(model_dir: Path) -> bool:
-    return all(
-        (model_dir / filename).is_file()
-        for filename in ("inference.json", "inference.yml", "inference.pdiparams")
-    )
+    try:
+        if model_dir.is_symlink() or not model_dir.is_dir():
+            return False
+        for filename in ("inference.json", "inference.yml", "inference.pdiparams"):
+            path = model_dir / filename
+            if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+                return False
+        return True
+    except OSError:
+        return False

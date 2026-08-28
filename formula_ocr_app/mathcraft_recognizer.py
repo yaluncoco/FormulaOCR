@@ -5,11 +5,20 @@ from pathlib import Path
 from typing import Any, Callable
 
 try:
-    from formula_ocr_app.model_downloader import DownloadProgressCallback
+    from formula_ocr_app.image_utils import load_rgb_image
+    from formula_ocr_app.model_api import DownloadProgressCallback
     from formula_ocr_app.mathcraft_model_downloader import ensure_mathcraft_model
-except ImportError:  # Allows `python formula_ocr_app/app.py`.
-    from model_downloader import DownloadProgressCallback
+    from formula_ocr_app.onnx_runtime import (
+        create_inference_session,
+        repeated_token_suffix_start,
+    )
+except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
+    if exc.name != "formula_ocr_app":
+        raise
+    from image_utils import load_rgb_image
+    from model_api import DownloadProgressCallback
     from mathcraft_model_downloader import ensure_mathcraft_model
+    from onnx_runtime import create_inference_session, repeated_token_suffix_start
 
 
 class MathCraftRuntimeError(RuntimeError):
@@ -103,15 +112,18 @@ class MathCraftFormulaRecognizer:
         model_dir = self._model_ensure(
             progress_callback=self.download_progress_callback,
         )
-        providers = _onnx_providers(ort, self.device)
         try:
-            encoder_session = ort.InferenceSession(
-                str(model_dir / "encoder_model.onnx"),
-                providers=providers,
+            encoder_session = create_inference_session(
+                ort,
+                model_dir / "encoder_model.onnx",
+                device=self.device,
+                error_type=MathCraftRuntimeError,
             )
-            decoder_session = ort.InferenceSession(
-                str(model_dir / "decoder_model.onnx"),
-                providers=providers,
+            decoder_session = create_inference_session(
+                ort,
+                model_dir / "decoder_model.onnx",
+                device=self.device,
+                error_type=MathCraftRuntimeError,
             )
             tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         except Exception as exc:  # pragma: no cover - depends on local runtime
@@ -137,10 +149,9 @@ class MathCraftFormulaRecognizer:
             ) from exc
 
         try:
-            with Image.open(image_path) as image:
-                image = image.convert("RGB")
-                image = image.resize(self._input_size(), Image.Resampling.BICUBIC)
-                pixels = np.asarray(image, dtype=np.float32) / 255.0
+            image = load_rgb_image(image_path)
+            image = image.resize(self._input_size(), Image.Resampling.BICUBIC)
+            pixels = np.asarray(image, dtype=np.float32) / 255.0
         except (OSError, ValueError) as exc:
             raise MathCraftRuntimeError(f"无法读取公式图片：{image_path}") from exc
 
@@ -192,18 +203,6 @@ class MathCraftFormulaRecognizer:
         if decoder_start_id is None:
             decoder_start_id = 2
         return int(decoder_start_id), int(eos_id) if eos_id is not None else None
-
-
-def _onnx_providers(onnxruntime: Any, device: str) -> list[str]:
-    available = set(onnxruntime.get_available_providers())
-    normalized = device.lower()
-    if normalized.startswith("gpu") or normalized.startswith("cuda"):
-        if "CUDAExecutionProvider" not in available:
-            raise MathCraftRuntimeError(
-                "当前 ONNX Runtime 未提供 CUDAExecutionProvider，请选择 CPU。"
-            )
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    return ["CPUExecutionProvider"]
 
 
 def _softmax(logits: Any):
@@ -261,7 +260,13 @@ def _generate_formula_tokens(
             token_scores[result_row].append(
                 float(step_probs[active_row, next_token])
             )
-            repeated_suffix_start = _repeated_token_suffix_start(token_ids[result_row])
+            repeated_suffix_start = repeated_token_suffix_start(
+                token_ids[result_row],
+                min_generated_tokens=64,
+                min_repeated_tokens=32,
+                max_period=4,
+                min_repetitions=8,
+            )
             if repeated_suffix_start is not None:
                 del token_ids[result_row][repeated_suffix_start:]
                 del token_scores[result_row][repeated_suffix_start:]
@@ -281,27 +286,3 @@ def _generate_formula_tokens(
         active_indices = active_indices[keep_active_rows]
 
     return token_ids, token_scores, stopped_for_repetition
-
-
-def _repeated_token_suffix_start(
-    token_ids: list[int],
-    *,
-    min_generated_tokens: int = 64,
-    min_repeated_tokens: int = 32,
-    max_period: int = 4,
-    min_repetitions: int = 8,
-) -> int | None:
-    token_count = len(token_ids)
-    if token_count < min_generated_tokens:
-        return None
-    for period in range(1, max_period + 1):
-        pattern = token_ids[-period:]
-        start = token_count - period
-        repetitions = 1
-        while start >= period and token_ids[start - period : start] == pattern:
-            start -= period
-            repetitions += 1
-        if repetitions < min_repetitions or repetitions * period < min_repeated_tokens:
-            continue
-        return start + period
-    return None

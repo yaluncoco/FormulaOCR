@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 import zipfile
 from html import escape
 from pathlib import Path
@@ -162,13 +164,33 @@ def normalize_latex(latex: str) -> str:
 def clean_recognized_latex(latex: str) -> str:
     text = normalize_latex(latex)
     text = _normalize_ocr_separator_punctuation(text)
-    commands: list[str] = []
+    text = _normalize_redundant_cases_delimiters(text)
+    text = re.sub(
+        r"\\\s+(?=(?:mathbb|mathcal|mathbf|mathrm|mathit|mathsf|mathtt|"
+        r"mathfrak|operatorname|text|begin|end|left|right)\b)",
+        lambda _match: "\\",
+        text,
+    )
+    text = _normalize_spaced_roman_words(text)
+    # A decimal point is one token in the source image. OCR models often emit
+    # spaces around it, which several MathML converters render as punctuation
+    # rather than as part of the number.
+    text = re.sub(r"(?<=\d)\s*\.\s*(?=\d)", ".", text)
+    protected_fragments: list[str] = []
 
-    def _save_command(match: re.Match[str]) -> str:
-        commands.append(match.group(0))
-        return f"\uFFF0{len(commands) - 1}\uFFF1"
+    def _save_fragment(match: re.Match[str]) -> str:
+        protected_fragments.append(match.group(0))
+        return f"\uFFF0{len(protected_fragments) - 1}\uFFF1"
 
-    protected = re.sub(r"\\[A-Za-z]+|\\.", _save_command, text)
+    # OCR spacing cleanup is useful for variables (``x y`` -> ``xy``), but it
+    # must not collapse prose inside text-like commands (``\text{if x}``).
+    protected = re.sub(
+        r"\\(?:operatorname|mathrm|text|mathbf)\*?\s*"
+        r"\{(?:[^{}]|\{[^{}]*\})*\}",
+        _save_fragment,
+        text,
+    )
+    protected = re.sub(r"\\[A-Za-z]+|\\.", _save_fragment, protected)
     previous = None
     while previous != protected:
         previous = protected
@@ -176,10 +198,10 @@ def clean_recognized_latex(latex: str) -> str:
     protected = re.sub(r"([A-Za-z0-9}])\s+([_^])", r"\1\2", protected)
     protected = re.sub(r"([_^])\s+([A-Za-z0-9{])", r"\1\2", protected)
 
-    def _restore_command(match: re.Match[str]) -> str:
-        return commands[int(match.group(1))]
+    def _restore_fragment(match: re.Match[str]) -> str:
+        return protected_fragments[int(match.group(1))]
 
-    text = re.sub(r"\uFFF0(\d+)\uFFF1", _restore_command, protected)
+    text = re.sub(r"\uFFF0(\d+)\uFFF1", _restore_fragment, protected)
     text = re.sub(
         r"\\(mathbb|mathcal|mathbf|mathit|mathsf|mathtt|mathfrak)\s+([A-Za-z])",
         r"\\\1{\2}",
@@ -191,11 +213,91 @@ def clean_recognized_latex(latex: str) -> str:
     return text.strip()
 
 
+def _normalize_spaced_roman_words(text: str) -> str:
+    r"""Join OCR-tokenized words inside ``\mathrm{...}``.
+
+    Formula models commonly emit ``\mathrm{o t h e r w i\;s e}`` for a
+    printed word such as "otherwise". Ordinary spaces are ignored by TeX, but
+    spacing commands such as ``\;`` visibly split the word and also degrade
+    MathML/Word conversion. Only runs made entirely from individually spaced
+    ASCII letters are joined; normal prose such as ``\mathrm{speed of light}``
+    and all ``\text{...}`` content remain untouched.
+    """
+
+    def normalize_command(match: re.Match[str]) -> str:
+        prefix, body, suffix = match.groups()
+        split_word = re.compile(
+            r"(?<![A-Za-z])[A-Za-z]{2,}"
+            r"(?:(?:\s*\\[,:;!]\s*)+[A-Za-z]{2,})+"
+            r"(?![A-Za-z])"
+        )
+
+        def join_known_word(word: re.Match[str]) -> str:
+            joined = re.sub(r"\s*\\[,:;!]\s*", "", word.group(0))
+            # Keep ordinary mathematical spacing intact. These are common
+            # piecewise-condition words that formula models are known to split
+            # in the middle despite being one printed word.
+            if joined.casefold() in {"otherwise", "whereas", "therefore"}:
+                return joined
+            return word.group(0)
+
+        body = split_word.sub(join_known_word, body)
+        spaced_letters = re.compile(
+            r"(?<![A-Za-z])[A-Za-z]"
+            r"(?:(?:\s+|\\[,:;!])(?=[A-Za-z])[A-Za-z])+"
+            r"(?![A-Za-z])"
+        )
+        body = spaced_letters.sub(
+            lambda word: re.sub(r"\s+|\\[,:;!]", "", word.group(0)),
+            body,
+        )
+        return prefix + body + suffix
+
+    return re.sub(
+        r"(\\mathrm\*?\s*\{)((?:[^{}]|\{[^{}]*\})*)(\})",
+        normalize_command,
+        text,
+    )
+
+
 def _normalize_ocr_separator_punctuation(text: str) -> str:
     text = text.replace("，", ",")
-    # Formula OCR often mistakes an argument-separating comma after a subscript
-    # group for a prime-like quote. Keep real primes such as f'(x) untouched.
-    return re.sub(r"(?<=[}\]])\s*['’‘′‵ʹ]\s*(?=(?:[A-Za-z]|\\[A-Za-z]+))", ",", text)
+    # Formula OCR sometimes emits a quote between concatenated tensor features,
+    # for example ``F_{local}'F_{global}``.  Restrict this repair to repeated
+    # uppercase tensor names with descriptive braced subscripts.  A broad
+    # "quote after }" rule corrupts legitimate primes such as ``{f}'x`` and
+    # ``x_{i}'y_{j}``.
+    return re.sub(
+        r"(?P<left>(?P<base>[A-Z])\s*_\s*\{\s*"
+        r"[A-Za-z][A-Za-z0-9_-]{1,}\s*\})\s*"
+        r"['’‘′‵ʹ]\s*(?=(?P=base)\s*_\s*\{\s*"
+        r"[A-Za-z][A-Za-z0-9_-]{1,}\s*\})",
+        r"\g<left>,",
+        text,
+    )
+
+
+def _normalize_redundant_cases_delimiters(text: str) -> str:
+    r"""Remove an OCR-added brace around an environment that already owns it.
+
+    ``cases`` renders its own left brace. Some formula models emit
+    ``\Big\{\begin{cases}`` or ``\left\{\begin{cases}...\right.``, which
+    produces a visible duplicate brace in MathML/Word even though the OCR
+    result otherwise has the correct piecewise structure. ``aligned`` does
+    not own a brace and is deliberately left unchanged.
+    """
+
+    text = re.sub(
+        r"\\(?:left|big|Big|bigg|Bigg)[lr]?\s*\\\{\s*"
+        r"(?=\\begin\s*\{\s*cases\s*\})",
+        "",
+        text,
+    )
+    return re.sub(
+        r"(\\end\s*\{\s*cases\s*\})\s*\\right\s*\.",
+        r"\1",
+        text,
+    )
 
 
 _NAMED_OPERATOR_COMMANDS = {
@@ -486,10 +588,6 @@ def _is_word_argument_list_group(element: ElementTree.Element) -> bool:
         WORD_DELIMITER_PAIRS.get(opening) == closing
         and any(_is_word_comma_element(child) for child in children[1:-1])
     )
-
-
-def _is_word_operator_text(element: ElementTree.Element, text: str) -> bool:
-    return _local_name(element.tag) == "mo" and _element_text(element).strip() == text
 
 
 def _is_word_comma_element(element: ElementTree.Element) -> bool:
@@ -991,13 +1089,31 @@ def export_formula_docx(
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
 </Relationships>
 """
-    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as docx:
-        docx.writestr("[Content_Types].xml", content_types)
-        docx.writestr("_rels/.rels", package_rels)
-        docx.writestr("word/document.xml", document_xml)
-        docx.writestr("word/_rels/document.xml.rels", rels_xml)
-        if image_path and image_path.exists():
-            docx.write(image_path, f"word/media/{media_name}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=output_path.parent,
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+        with zipfile.ZipFile(temporary_path, "w", zipfile.ZIP_DEFLATED) as docx:
+            docx.writestr("[Content_Types].xml", content_types)
+            docx.writestr("_rels/.rels", package_rels)
+            docx.writestr("word/document.xml", document_xml)
+            docx.writestr("word/_rels/document.xml.rels", rels_xml)
+            if image_path and image_path.exists():
+                docx.write(image_path, f"word/media/{media_name}")
+        os.replace(temporary_path, output_path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 class _LatexMathMLParser:

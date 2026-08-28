@@ -5,11 +5,20 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from formula_ocr_app.image_utils import load_rgb_image
     from formula_ocr_app.mixtex_model_downloader import ensure_mixtex_model
-    from formula_ocr_app.model_downloader import DownloadProgressCallback
-except ImportError:  # Allows `python formula_ocr_app/app.py`.
+    from formula_ocr_app.model_api import DownloadProgressCallback
+    from formula_ocr_app.onnx_runtime import (
+        create_inference_session,
+        repeated_token_suffix_start,
+    )
+except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
+    if exc.name != "formula_ocr_app":
+        raise
+    from image_utils import load_rgb_image
     from mixtex_model_downloader import ensure_mixtex_model
-    from model_downloader import DownloadProgressCallback
+    from model_api import DownloadProgressCallback
+    from onnx_runtime import create_inference_session, repeated_token_suffix_start
 
 
 class MixTexRuntimeError(RuntimeError):
@@ -89,15 +98,18 @@ class MixTexFormulaRecognizer:
         model_dir = ensure_mixtex_model(
             progress_callback=self.download_progress_callback,
         )
-        providers = _onnx_providers(ort, self.device)
         try:
-            encoder_session = ort.InferenceSession(
-                str(model_dir / "encoder_model.onnx"),
-                providers=providers,
+            encoder_session = create_inference_session(
+                ort,
+                model_dir / "encoder_model.onnx",
+                device=self.device,
+                error_type=MixTexRuntimeError,
             )
-            decoder_session = ort.InferenceSession(
-                str(model_dir / "decoder_model_merged.onnx"),
-                providers=providers,
+            decoder_session = create_inference_session(
+                ort,
+                model_dir / "decoder_model_merged.onnx",
+                device=self.device,
+                error_type=MixTexRuntimeError,
             )
             tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         except Exception as exc:  # pragma: no cover - depends on local runtime
@@ -113,15 +125,13 @@ class MixTexFormulaRecognizer:
     def _preprocess_image(self, image_path: Path):
         try:
             import numpy as np
-            from PIL import Image
         except ImportError as exc:  # pragma: no cover - environment dependent
             raise MixTexRuntimeError(
                 "程序缺少 MixTeX 的 Pillow 或 numpy 运行组件。"
             ) from exc
         try:
-            with Image.open(image_path) as image:
-                image = _pad_image(image.convert("RGB"), (448, 448))
-                pixels = np.asarray(image, dtype=np.float32) / 255.0
+            image = _pad_image(load_rgb_image(image_path), (448, 448))
+            pixels = np.asarray(image, dtype=np.float32) / 255.0
         except (OSError, ValueError) as exc:
             raise MixTexRuntimeError(f"无法读取公式图片：{image_path}") from exc
 
@@ -239,14 +249,22 @@ def _generate_tokens(
         }
         inputs.update(cache)
         if cache_branch is not None:
-            inputs[cache_branch.name] = np.asarray([True], dtype=bool)
+            inputs[cache_branch.name] = np.asarray([bool(generated)], dtype=bool)
         outputs = decoder_session.run(None, inputs)
         logits = outputs[0]
         next_id = int(np.argmax(logits[:, -1, :], axis=-1)[0])
         if eos_id is not None and next_id == eos_id:
             break
         generated.append(next_id)
-        if _repeated_token_suffix(generated) is not None:
+        repeated_suffix_start = repeated_token_suffix_start(
+            generated,
+            min_generated_tokens=42,
+            min_repeated_tokens=21,
+            max_period=4,
+            min_repetitions=7,
+        )
+        if repeated_suffix_start is not None:
+            del generated[repeated_suffix_start:]
             break
         for cache_input in cache_inputs:
             present_name = cache_input.name.replace(
@@ -260,38 +278,3 @@ def _generate_tokens(
             cache[cache_input.name] = outputs[output_index]
         next_input_id = next_id
     return generated
-
-
-def _repeated_token_suffix(
-    token_ids: list[int],
-    *,
-    min_generated_tokens: int = 42,
-    min_repeated_tokens: int = 21,
-    max_period: int = 4,
-    min_repetitions: int = 7,
-) -> int | None:
-    count = len(token_ids)
-    if count < min_generated_tokens:
-        return None
-    for period in range(1, max_period + 1):
-        pattern = token_ids[-period:]
-        start = count - period
-        repetitions = 1
-        while start >= period and token_ids[start - period : start] == pattern:
-            start -= period
-            repetitions += 1
-        if repetitions >= min_repetitions and repetitions * period >= min_repeated_tokens:
-            return start + period
-    return None
-
-
-def _onnx_providers(onnxruntime: Any, device: str) -> list[str]:
-    available = set(onnxruntime.get_available_providers())
-    normalized = device.lower()
-    if normalized.startswith("gpu") or normalized.startswith("cuda"):
-        if "CUDAExecutionProvider" not in available:
-            raise MixTexRuntimeError(
-                "当前 ONNX Runtime 未提供 CUDAExecutionProvider，请选择 CPU。"
-            )
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    return ["CPUExecutionProvider"]

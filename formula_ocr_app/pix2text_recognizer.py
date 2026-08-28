@@ -3,7 +3,9 @@ from __future__ import annotations
 try:
     from formula_ocr_app.mathcraft_recognizer import MathCraftFormulaRecognizer
     from formula_ocr_app.pix2text_model_downloader import ensure_pix2text_model
-except ImportError:  # Allows `python formula_ocr_app/app.py`.
+except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
+    if exc.name != "formula_ocr_app":
+        raise
     from mathcraft_recognizer import MathCraftFormulaRecognizer
     from pix2text_model_downloader import ensure_pix2text_model
 

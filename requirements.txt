@@ -1,14 +1,9 @@
 Pillow==12.1.0
 numpy==1.26.4
 paddlepaddle==3.2.0
-paddleocr==3.6.0
-paddlex[ocr-core]==3.6.1
 PyYAML==6.0.2
 requests==2.34.2
-filelock==3.29.1
 onnxruntime==1.23.2
-rapid_latex_ocr==0.0.9
-aiohttp==3.14.1
 tokenizers==0.23.1
 ftfy==6.3.1
 latex2mathml==3.81.0

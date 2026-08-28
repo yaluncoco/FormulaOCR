@@ -1,26 +1,48 @@
 from __future__ import annotations
 
-import hashlib
-import os
 import shutil
 import stat
 import tempfile
-import time
 import zipfile
 from pathlib import Path
 from typing import Callable
 
-import requests
-from filelock import FileLock
-
 try:
-    from formula_ocr_app.model_downloader import DownloadProgressCallback
+    from formula_ocr_app.download_utils import (
+        RemoteFileSpec,
+        VerifiedDownloadFailure,
+        archive_member_name_is_safe,
+        archive_payload_is_within_limits,
+        download_verified_file,
+        ensure_safe_directory,
+        file_is_valid,
+        raise_model_download_error,
+        recover_model_directory_backup,
+        replace_model_directory,
+    )
+    from formula_ocr_app.interprocess_lock import InterProcessFileLock
+    from formula_ocr_app.model_api import DownloadProgressCallback
     from formula_ocr_app.runtime_paths import (
         bundled_external_model_dir,
         external_model_dir,
     )
-except ImportError:  # Allows `python formula_ocr_app/app.py`.
-    from model_downloader import DownloadProgressCallback
+except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
+    if exc.name != "formula_ocr_app":
+        raise
+    from download_utils import (
+        RemoteFileSpec,
+        VerifiedDownloadFailure,
+        archive_member_name_is_safe,
+        archive_payload_is_within_limits,
+        download_verified_file,
+        ensure_safe_directory,
+        file_is_valid,
+        raise_model_download_error,
+        recover_model_directory_backup,
+        replace_model_directory,
+    )
+    from interprocess_lock import InterProcessFileLock
+    from model_api import DownloadProgressCallback
     from runtime_paths import bundled_external_model_dir, external_model_dir
 
 
@@ -125,9 +147,20 @@ def ensure_mixtex_model(
         _notify(progress_callback, MIXTEX_ARCHIVE_SIZE, MIXTEX_ARCHIVE_SIZE)
         return bundled
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    lock = FileLock(str(destination.with_suffix(".lock")))
+    ensure_safe_directory(destination.parent)
+    lock = InterProcessFileLock(
+        destination.with_suffix(".lock"),
+        on_wait=lambda: _notify(progress_callback, 0, MIXTEX_ARCHIVE_SIZE),
+    )
     with lock:
+        recover_model_directory_backup(
+            destination,
+            is_model_valid=lambda path: _model_files_are_valid(
+                path,
+                verify_hash=True,
+            ),
+            error_type=MixTexModelDownloadError,
+        )
         if _model_files_are_valid(destination, verify_hash=True):
             _notify(progress_callback, MIXTEX_ARCHIVE_SIZE, MIXTEX_ARCHIVE_SIZE)
             return destination
@@ -136,8 +169,10 @@ def ensure_mixtex_model(
             _notify(progress_callback, MIXTEX_ARCHIVE_SIZE, MIXTEX_ARCHIVE_SIZE)
             return bundled
 
-        downloads_dir = destination.parent / ".downloads" / MIXTEX_MODEL_ID
-        downloads_dir.mkdir(parents=True, exist_ok=True)
+        downloads_root = destination.parent / ".downloads"
+        ensure_safe_directory(downloads_root)
+        downloads_dir = downloads_root / MIXTEX_MODEL_ID
+        ensure_safe_directory(downloads_dir)
         archive_path = downloads_dir / MIXTEX_ARCHIVE_NAME
         _download_archive(archive_path, progress_callback)
         _install_archive(archive_path, destination, downloads_dir)
@@ -153,6 +188,8 @@ def _download_archive(
     archive_path: Path,
     progress_callback: MixTexProgressCallback | None,
 ) -> None:
+    import requests
+
     if _file_is_valid(
         archive_path,
         MIXTEX_ARCHIVE_SHA256,
@@ -161,68 +198,33 @@ def _download_archive(
     ):
         _notify(progress_callback, MIXTEX_ARCHIVE_SIZE, MIXTEX_ARCHIVE_SIZE)
         return
-    archive_path.unlink(missing_ok=True)
-
     partial_path = archive_path.with_suffix(archive_path.suffix + ".part")
-    offset = partial_path.stat().st_size if partial_path.is_file() else 0
-    if offset >= MIXTEX_ARCHIVE_SIZE:
-        partial_path.unlink(missing_ok=True)
-        offset = 0
-
-    headers = {"User-Agent": "FormulaOCR/2.0"}
-    if offset:
-        headers["Range"] = f"bytes={offset}-"
     try:
-        response = requests.get(
-            MIXTEX_RELEASE_URL,
-            stream=True,
+        download_verified_file(
+            RemoteFileSpec(
+                name=MIXTEX_ARCHIVE_NAME,
+                size=MIXTEX_ARCHIVE_SIZE,
+                sha256=MIXTEX_ARCHIVE_SHA256,
+                url=MIXTEX_RELEASE_URL,
+            ),
+            archive_path,
+            partial=partial_path,
+            completed=0,
+            total=MIXTEX_ARCHIVE_SIZE,
+            notify=lambda downloaded, total: _notify(
+                progress_callback, downloaded, total
+            ),
+            request_get=requests.get,
+            request_exception=requests.RequestException,
             timeout=(20, 180),
-            headers=headers,
+            chunk_size=CHUNK_SIZE,
         )
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise MixTexModelDownloadError(
-            f"MixTeX 模型下载失败：{MIXTEX_RELEASE_PAGE_URL}\n{exc}"
-        ) from exc
-
-    append = offset > 0 and response.status_code == 206
-    if not append:
-        offset = 0
-    mode = "ab" if append else "wb"
-    try:
-        _notify(progress_callback, offset, MIXTEX_ARCHIVE_SIZE)
-        last_report = 0.0
-        with partial_path.open(mode) as stream:
-            for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
-                if not chunk:
-                    continue
-                stream.write(chunk)
-                offset += len(chunk)
-                now = time.monotonic()
-                if now - last_report >= 0.5 or offset >= MIXTEX_ARCHIVE_SIZE:
-                    _notify(progress_callback, offset, MIXTEX_ARCHIVE_SIZE)
-                    last_report = now
-    except (OSError, requests.RequestException) as exc:
-        raise MixTexModelDownloadError(
-            f"MixTeX 下载中断，进度已保留：{partial_path}\n{exc}"
-        ) from exc
-    finally:
-        response.close()
-
-    if offset != MIXTEX_ARCHIVE_SIZE:
-        partial_path.unlink(missing_ok=True)
-        raise MixTexModelDownloadError(
-            f"MixTeX 模型下载不完整：{offset} / {MIXTEX_ARCHIVE_SIZE} 字节"
+    except VerifiedDownloadFailure as failure:
+        raise_model_download_error(
+            failure,
+            error_type=MixTexModelDownloadError,
+            label="MixTeX",
         )
-    if _sha256(partial_path) != MIXTEX_ARCHIVE_SHA256:
-        partial_path.unlink(missing_ok=True)
-        raise MixTexModelDownloadError("MixTeX 模型压缩包 SHA-256 校验失败")
-    try:
-        os.replace(partial_path, archive_path)
-    except OSError as exc:
-        raise MixTexModelDownloadError(
-            f"无法保存 MixTeX 模型压缩包：{archive_path}\n{exc}"
-        ) from exc
 
 
 def _install_archive(
@@ -244,53 +246,35 @@ def _install_archive(
             raise MixTexModelDownloadError(
                 "MixTeX 压缩包缺少 onnx 模型文件或 SHA-256 校验失败"
             )
-        _replace_model_directory(source, destination)
+        replace_model_directory(
+            source,
+            destination,
+            is_model_valid=lambda path: _model_files_are_valid(
+                path,
+                verify_hash=True,
+            ),
+            error_type=MixTexModelDownloadError,
+        )
     except (OSError, zipfile.BadZipFile) as exc:
         raise MixTexModelDownloadError(
             f"MixTeX 模型解压失败：{archive_path}\n{exc}"
         ) from exc
     finally:
         shutil.rmtree(extraction_dir, ignore_errors=True)
-    archive_path.unlink(missing_ok=True)
-
-
-def _replace_model_directory(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.is_symlink():
-        raise MixTexModelDownloadError(
-            f"拒绝覆盖链接模型目录：{destination}"
-        )
-    backup = destination.with_name(destination.name + ".bak")
-    if backup.exists() or backup.is_symlink():
-        if backup.is_symlink() or not backup.is_dir():
-            raise MixTexModelDownloadError(f"模型备份路径不是安全目录：{backup}")
-        shutil.rmtree(backup)
-    if destination.exists():
-        if not destination.is_dir():
-            raise MixTexModelDownloadError(f"模型安装路径不是目录：{destination}")
-        destination.replace(backup)
     try:
-        shutil.move(str(source), str(destination))
+        archive_path.unlink(missing_ok=True)
     except OSError:
-        if backup.exists() and not destination.exists():
-            backup.replace(destination)
-        raise
-    if backup.exists():
-        shutil.rmtree(backup)
+        pass
 
 
 def _validate_zip_members(members: list[zipfile.ZipInfo]) -> None:
+    if not archive_payload_is_within_limits(
+        len(members),
+        sum(max(0, member.file_size) for member in members),
+    ):
+        raise MixTexModelDownloadError("MixTeX 压缩包解压规模超过安全上限")
     for member in members:
-        normalized_name = member.filename.replace("\\", "/")
-        path = Path(normalized_name)
-        has_windows_drive = len(normalized_name) >= 2 and normalized_name[1] == ":"
-        if (
-            not normalized_name
-            or "\x00" in normalized_name
-            or path.is_absolute()
-            or has_windows_drive
-            or ".." in path.parts
-        ):
+        if not archive_member_name_is_safe(member.filename):
             raise MixTexModelDownloadError(
                 f"MixTeX 压缩包包含不安全路径：{member.filename}"
             )
@@ -302,6 +286,11 @@ def _validate_zip_members(members: list[zipfile.ZipInfo]) -> None:
 
 
 def _model_files_are_valid(root: Path, *, verify_hash: bool) -> bool:
+    try:
+        if root.is_symlink() or not root.is_dir():
+            return False
+    except OSError:
+        return False
     return all(
         _file_is_valid(
             root / filename,
@@ -325,17 +314,14 @@ def _file_is_valid(
             return False
         if expected_size is not None and path.stat().st_size != expected_size:
             return False
-        return not verify_hash or _sha256(path) == digest
+        return file_is_valid(
+            path,
+            expected_size if expected_size is not None else path.stat().st_size,
+            digest,
+            verify_hash=verify_hash,
+        )
     except OSError:
         return False
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(CHUNK_SIZE):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _notify(

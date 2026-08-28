@@ -8,7 +8,9 @@ from dataclasses import dataclass
 
 try:
     from formula_ocr_app.formula_formats import mathml_to_word_mathml
-except ImportError:  # Allows `python formula_ocr_app/app.py`.
+except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
+    if exc.name != "formula_ocr_app":
+        raise
     from formula_formats import mathml_to_word_mathml
 
 
@@ -235,8 +237,8 @@ def _cf_html(html: str) -> bytes:
 def _open_windows_clipboard(
     owner_hwnd: int | None,
     *,
-    retries: int = 100,
-    delay_seconds: float = 0.05,
+    retries: int = 12,
+    delay_seconds: float = 0.025,
 ) -> None:
     user32 = ctypes.windll.user32
     hwnd = ctypes.c_void_p(owner_hwnd) if owner_hwnd else None

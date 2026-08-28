@@ -1,24 +1,46 @@
 from __future__ import annotations
 
-import hashlib
-import os
 import shutil
 import stat
 import tempfile
-import time
 import zipfile
 from pathlib import Path
 from typing import Callable
 
-import requests
-from filelock import FileLock
-
 try:
+    from formula_ocr_app.download_utils import (
+        RemoteFileSpec,
+        VerifiedDownloadFailure,
+        archive_member_name_is_safe,
+        archive_payload_is_within_limits,
+        download_verified_file,
+        ensure_safe_directory,
+        file_is_valid,
+        raise_model_download_error,
+        recover_model_directory_backup,
+        replace_model_directory,
+    )
+    from formula_ocr_app.interprocess_lock import InterProcessFileLock
     from formula_ocr_app.runtime_paths import (
         bundled_external_model_dir,
         external_model_dir,
     )
-except ImportError:  # Allows `python formula_ocr_app/app.py`.
+except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
+    if exc.name != "formula_ocr_app":
+        raise
+    from download_utils import (
+        RemoteFileSpec,
+        VerifiedDownloadFailure,
+        archive_member_name_is_safe,
+        archive_payload_is_within_limits,
+        download_verified_file,
+        ensure_safe_directory,
+        file_is_valid,
+        raise_model_download_error,
+        recover_model_directory_backup,
+        replace_model_directory,
+    )
+    from interprocess_lock import InterProcessFileLock
     from runtime_paths import bundled_external_model_dir, external_model_dir
 
 
@@ -79,10 +101,21 @@ def ensure_mathcraft_model(
         _notify(progress_callback, MATHCRAFT_ARCHIVE_SIZE, MATHCRAFT_ARCHIVE_SIZE)
         return bundled
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    lock = FileLock(str(destination.with_suffix(".lock")))
+    ensure_safe_directory(destination.parent)
+    lock = InterProcessFileLock(
+        destination.with_suffix(".lock"),
+        on_wait=lambda: _notify(progress_callback, 0, MATHCRAFT_ARCHIVE_SIZE),
+    )
 
     with lock:
+        recover_model_directory_backup(
+            destination,
+            is_model_valid=lambda path: _model_files_are_valid(
+                path,
+                verify_hash=True,
+            ),
+            error_type=MathCraftModelDownloadError,
+        )
         if _model_files_are_valid(destination, verify_hash=True):
             _notify(progress_callback, MATHCRAFT_ARCHIVE_SIZE, MATHCRAFT_ARCHIVE_SIZE)
             return destination
@@ -92,7 +125,7 @@ def ensure_mathcraft_model(
             return bundled
 
         downloads_dir = destination.parent / ".downloads"
-        downloads_dir.mkdir(parents=True, exist_ok=True)
+        ensure_safe_directory(downloads_dir)
         archive_path = downloads_dir / "mathcraft-formula-rec.zip"
         _download_archive(archive_path, progress_callback)
         _install_archive(archive_path, destination, downloads_dir)
@@ -108,6 +141,8 @@ def _download_archive(
     archive_path: Path,
     progress_callback: MathCraftProgressCallback | None,
 ) -> None:
+    import requests
+
     if _file_is_valid(
         archive_path,
         MATHCRAFT_ARCHIVE_SHA256,
@@ -116,68 +151,33 @@ def _download_archive(
     ):
         _notify(progress_callback, MATHCRAFT_ARCHIVE_SIZE, MATHCRAFT_ARCHIVE_SIZE)
         return
-    archive_path.unlink(missing_ok=True)
-
     partial_path = archive_path.with_suffix(archive_path.suffix + ".part")
-    offset = partial_path.stat().st_size if partial_path.is_file() else 0
-    if offset >= MATHCRAFT_ARCHIVE_SIZE:
-        partial_path.unlink(missing_ok=True)
-        offset = 0
-
-    headers = {"User-Agent": "FormulaOCR/2.0"}
-    if offset:
-        headers["Range"] = f"bytes={offset}-"
     try:
-        response = requests.get(
-            MATHCRAFT_RELEASE_URL,
-            stream=True,
+        download_verified_file(
+            RemoteFileSpec(
+                name="mathcraft-formula-rec.zip",
+                size=MATHCRAFT_ARCHIVE_SIZE,
+                sha256=MATHCRAFT_ARCHIVE_SHA256,
+                url=MATHCRAFT_RELEASE_URL,
+            ),
+            archive_path,
+            partial=partial_path,
+            completed=0,
+            total=MATHCRAFT_ARCHIVE_SIZE,
+            notify=lambda downloaded, total: _notify(
+                progress_callback, downloaded, total
+            ),
+            request_get=requests.get,
+            request_exception=requests.RequestException,
             timeout=(20, 120),
-            headers=headers,
+            chunk_size=CHUNK_SIZE,
         )
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise MathCraftModelDownloadError(
-            f"MathCraft 模型下载失败：{MATHCRAFT_RELEASE_URL}\n{exc}"
-        ) from exc
-
-    append = offset > 0 and response.status_code == 206
-    if not append:
-        offset = 0
-    mode = "ab" if append else "wb"
-    try:
-        _notify(progress_callback, offset, MATHCRAFT_ARCHIVE_SIZE)
-        last_report = 0.0
-        with partial_path.open(mode) as stream:
-            for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
-                if not chunk:
-                    continue
-                stream.write(chunk)
-                offset += len(chunk)
-                now = time.monotonic()
-                if now - last_report >= 0.5 or offset >= MATHCRAFT_ARCHIVE_SIZE:
-                    _notify(progress_callback, offset, MATHCRAFT_ARCHIVE_SIZE)
-                    last_report = now
-    except (OSError, requests.RequestException) as exc:
-        raise MathCraftModelDownloadError(
-            f"MathCraft 下载中断，进度已保留：{partial_path}\n{exc}"
-        ) from exc
-    finally:
-        response.close()
-
-    if offset != MATHCRAFT_ARCHIVE_SIZE:
-        partial_path.unlink(missing_ok=True)
-        raise MathCraftModelDownloadError(
-            f"MathCraft 模型下载不完整：{offset} / {MATHCRAFT_ARCHIVE_SIZE} 字节"
+    except VerifiedDownloadFailure as failure:
+        raise_model_download_error(
+            failure,
+            error_type=MathCraftModelDownloadError,
+            label="MathCraft",
         )
-    if _sha256(partial_path) != MATHCRAFT_ARCHIVE_SHA256:
-        partial_path.unlink(missing_ok=True)
-        raise MathCraftModelDownloadError("MathCraft 模型压缩包 SHA-256 校验失败")
-    try:
-        os.replace(partial_path, archive_path)
-    except OSError as exc:
-        raise MathCraftModelDownloadError(
-            f"无法保存 MathCraft 模型压缩包：{archive_path}\n{exc}"
-        ) from exc
 
 
 def _install_archive(
@@ -198,43 +198,38 @@ def _install_archive(
                 "MathCraft 模型压缩包缺少文件或 SHA-256 校验失败"
             )
 
-        backup = destination.with_name(destination.name + ".bak")
-        if backup.exists():
-            shutil.rmtree(backup)
-        if destination.exists():
-            destination.replace(backup)
-        try:
-            shutil.move(str(extraction_dir), str(destination))
-        except OSError:
-            if backup.exists() and not destination.exists():
-                backup.replace(destination)
-            raise
-        if backup.exists():
-            shutil.rmtree(backup)
+        replace_model_directory(
+            extraction_dir,
+            destination,
+            is_model_valid=lambda path: _model_files_are_valid(
+                path,
+                verify_hash=True,
+            ),
+            error_type=MathCraftModelDownloadError,
+        )
     except (OSError, zipfile.BadZipFile) as exc:
         raise MathCraftModelDownloadError(
             f"MathCraft 模型解压失败：{archive_path}\n{exc}"
         ) from exc
     finally:
         shutil.rmtree(extraction_dir, ignore_errors=True)
-    archive_path.unlink(missing_ok=True)
+    try:
+        archive_path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _validate_zip_members(members: list[zipfile.ZipInfo]) -> None:
+    if not archive_payload_is_within_limits(
+        len(members),
+        sum(max(0, member.file_size) for member in members),
+    ):
+        raise MathCraftModelDownloadError("MathCraft 压缩包解压规模超过安全上限")
     for member in members:
         # ZIP names conventionally use '/', but reject Windows separators too
         # so a malicious archive cannot pass validation on one host and escape
         # its extraction directory on another.
-        normalized_name = member.filename.replace("\\", "/")
-        path = Path(normalized_name)
-        has_windows_drive = len(normalized_name) >= 2 and normalized_name[1] == ":"
-        if (
-            not normalized_name
-            or "\x00" in normalized_name
-            or path.is_absolute()
-            or has_windows_drive
-            or ".." in path.parts
-        ):
+        if not archive_member_name_is_safe(member.filename):
             raise MathCraftModelDownloadError(
                 f"MathCraft 压缩包包含不安全路径：{member.filename}"
             )
@@ -246,6 +241,11 @@ def _validate_zip_members(members: list[zipfile.ZipInfo]) -> None:
 
 
 def _model_files_are_valid(root: Path, *, verify_hash: bool = True) -> bool:
+    try:
+        if root.is_symlink() or not root.is_dir():
+            return False
+    except OSError:
+        return False
     return all(
         _file_is_valid(root / name, digest, verify_hash=verify_hash)
         for name, digest in MATHCRAFT_MODEL_FILES.items()
@@ -264,17 +264,14 @@ def _file_is_valid(
             return False
         if expected_size is not None and path.stat().st_size != expected_size:
             return False
-        return not verify_hash or _sha256(path) == digest
+        return file_is_valid(
+            path,
+            expected_size if expected_size is not None else path.stat().st_size,
+            digest,
+            verify_hash=verify_hash,
+        )
     except OSError:
         return False
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(CHUNK_SIZE):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _notify(

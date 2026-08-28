@@ -2,22 +2,22 @@
 
 FormulaOCR depends on open-source OCR and formula-recognition components. This file records the main third-party projects used by the application and the notices users should keep when redistributing binaries or offline model packages.
 
-## PaddleOCR
+## PaddlePaddle, Paddle model assets, and PaddleX-compatible processing
 
-- Project: PaddleOCR
-- Repository: https://github.com/PaddlePaddle/PaddleOCR
-- Pinned Python package used for builds: `paddleocr==3.6.0`
-- Organization: PaddlePaddle / PaddleOCR Authors
+- Runtime: PaddlePaddle `paddlepaddle==3.2.0`
+- Repositories: https://github.com/PaddlePaddle/Paddle and https://github.com/PaddlePaddle/PaddleX
+- Model ecosystem: PaddlePaddle PP-FormulaNet, PP-FormulaNet+, UniMERNet, and `LaTeX_OCR_rec`
+- Organization: PaddlePaddle and the respective model authors
 - License: Apache License 2.0
-- Use in this project: formula recognition through PaddleOCR/PaddleX formula-recognition models.
+- Use in this project: direct native inference through `libpaddle`; FormulaOCR implements the required image preprocessing and tokenizer-based decoding locally.
 
-PaddleOCR source code and model files are not vendored in this repository. If you redistribute a packaged build that includes PaddleOCR, PaddlePaddle, PaddleX, runtime libraries, or model weights, keep the original third-party license files, copyright notices, and any model-specific usage terms with the distributed package.
+FormulaOCR does not import or redistribute the PaddleOCR or PaddleX Python packages. Its PP-FormulaNet/UniMERNet preprocessing and decoding behavior is compatible with and derived from the Apache-2.0 PaddleX formula-recognition processors. Paddle model files are downloaded separately from official release sources. If you redistribute a packaged build containing PaddlePaddle native libraries or model weights, keep the applicable upstream license, copyright notices, model cards, and usage terms.
 
 Suggested citation or acknowledgement:
 
 ```text
-This software uses PaddleOCR, an open-source OCR toolkit from the PaddlePaddle ecosystem:
-https://github.com/PaddlePaddle/PaddleOCR
+This software uses PaddlePaddle native inference and formula-recognition model assets from the Paddle ecosystem:
+https://github.com/PaddlePaddle/Paddle
 ```
 
 ## RapidLaTeXOCR and ONNX Runtime
@@ -28,11 +28,11 @@ https://github.com/PaddlePaddle/PaddleOCR
 - Use: optional community formula-recognition backend derived from LaTeX-OCR/pix2tex.
 - Runtime: Microsoft ONNX Runtime, MIT License.
 
-RapidLaTeXOCR model files are downloaded on demand from the project's official GitHub Release and verified with SHA-256. They are not committed to this repository or included in the default application archive.
+RapidLaTeXOCR model files are downloaded on demand from the project's official GitHub Release and verified with SHA-256. FormulaOCR implements the small Pillow/NumPy/ONNX inference adapter locally and does not depend on the RapidLaTeXOCR Python package. The model files are not committed to this repository or included in the default application archive.
 
 ## UniMERNet
 
-UniMERNet was developed by Shanghai AI Laboratory and is exposed here through the official PaddleOCR/PaddleX inference model catalog. Users redistributing model weights should retain the upstream model card, license, and attribution applicable to the downloaded release.
+UniMERNet was developed by Shanghai AI Laboratory and is exposed here through the official Paddle model catalog. FormulaOCR executes the exported model directly with Paddle Inference. Users redistributing model weights should retain the upstream model card, license, and attribution applicable to the downloaded release.
 
 ## UniMERNet Small ONNX
 
@@ -102,4 +102,12 @@ confirm it before first download/use. Do not include MixTeX weights in a
 commercial binary or offline package without written permission from the
 upstream rights holder.
 
-The application also uses Python packages listed in `requirements.txt`, including Pillow, paddlepaddle, paddlex, ONNX Runtime, RapidLaTeXOCR, latex2mathml, requests, aiohttp, tokenizers, ftfy, and PyInstaller. Their licenses are controlled by their respective upstream projects.
+## Inno Setup Simplified Chinese messages
+
+The Windows installer includes `installer/ChineseSimplified.isl` from the Inno
+Setup source repository at commit
+`69a2554fc9551f1d3da8df8ba659007dea3f906f`. The translation header credits
+Zhenghan Yang (Kira) and is retained verbatim apart from repository line-ending
+normalization. This file is used only while compiling the Windows installer.
+
+The application also uses the Python packages listed in `requirements.txt`: Pillow, NumPy, PaddlePaddle, PyYAML, Requests, ONNX Runtime, tokenizers, ftfy, latex2mathml, and PyInstaller. Their licenses are controlled by their respective upstream projects.

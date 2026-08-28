@@ -12,7 +12,12 @@ $chineseMessagesUrl = (
     "69a2554fc9551f1d3da8df8ba659007dea3f906f/" +
     "Files/Languages/ChineseSimplified.isl"
 )
-$chineseMessagesSha256 = "e0b0b350e2245f3c5e65586dfe43d574f6e7f06f2261149aba284954b3fc9a8d"
+$chineseMessagesSha256 = @(
+    # Upstream CRLF file and the repository-normalized LF equivalent.
+    "e0b0b350e2245f3c5e65586dfe43d574f6e7f06f2261149aba284954b3fc9a8d",
+    "bf0751fa176569c6faa2f6e17ed2734617bef325d5cc06eae030fdd0258ee778"
+)
+$repositoryTranslationFile = Join-Path $root "installer\ChineseSimplified.isl"
 
 if (-not $SkipAppBuild) {
     & (Join-Path $root "build_exe.ps1")
@@ -39,22 +44,28 @@ if (-not $iscc) {
 
 $env:FORMULA_OCR_REPO_ROOT = $root
 New-Item -ItemType Directory -Force -Path (Join-Path $root "dist\installer") | Out-Null
-$translationRoot = Join-Path ([IO.Path]::GetTempPath()) (
-    "FormulaOCR-Inno-" + [Guid]::NewGuid().ToString("N")
-)
-$translationFile = Join-Path $translationRoot "ChineseSimplified.isl"
+$translationRoot = $null
+$translationFile = $repositoryTranslationFile
 try {
-    New-Item -ItemType Directory -Force -Path $translationRoot | Out-Null
-    & curl.exe --location --fail --silent --show-error `
-        --retry 3 --retry-delay 2 `
-        --output $translationFile $chineseMessagesUrl
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unable to download the Inno Setup translation: exit code $LASTEXITCODE"
+    if (-not (Test-Path -LiteralPath $translationFile)) {
+        $translationRoot = Join-Path ([IO.Path]::GetTempPath()) (
+            "FormulaOCR-Inno-" + [Guid]::NewGuid().ToString("N")
+        )
+        $translationFile = Join-Path $translationRoot "ChineseSimplified.isl"
+        New-Item -ItemType Directory -Force -Path $translationRoot | Out-Null
+        & curl.exe --location --fail --silent --show-error `
+            --retry 5 --retry-delay 2 --retry-all-errors `
+            --connect-timeout 20 --max-time 180 `
+            --output $translationFile $chineseMessagesUrl
+        $curlExitCode = $LASTEXITCODE
+        if ($curlExitCode -ne 0 -or -not (Test-Path -LiteralPath $translationFile)) {
+            throw "Unable to download the Inno Setup translation: exit code $curlExitCode"
+        }
     }
     $translationHash = (
         Get-FileHash -LiteralPath $translationFile -Algorithm SHA256
     ).Hash.ToLowerInvariant()
-    if ($translationHash -ne $chineseMessagesSha256) {
+    if ($translationHash -notin $chineseMessagesSha256) {
         throw "Inno Setup Chinese translation SHA-256 mismatch: $translationHash"
     }
     $env:FORMULA_OCR_CHINESE_ISL = $translationFile
@@ -65,7 +76,7 @@ try {
 }
 finally {
     Remove-Item Env:FORMULA_OCR_CHINESE_ISL -ErrorAction SilentlyContinue
-    if (Test-Path $translationRoot) {
+    if ($translationRoot -and (Test-Path -LiteralPath $translationRoot)) {
         Remove-Item -LiteralPath $translationRoot -Recurse -Force
     }
 }

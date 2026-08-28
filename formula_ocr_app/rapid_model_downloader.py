@@ -1,21 +1,37 @@
 from __future__ import annotations
 
-import hashlib
-import os
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-import requests
-from filelock import FileLock
-
 try:
+    from formula_ocr_app.download_utils import (
+        VerifiedDownloadFailure,
+        download_verified_file,
+        ensure_safe_directory,
+        file_is_valid,
+        model_files_are_valid,
+        raise_model_download_error,
+        sha256_file,
+    )
+    from formula_ocr_app.interprocess_lock import InterProcessFileLock
     from formula_ocr_app.runtime_paths import (
         bundled_external_model_dir,
         external_model_dir,
     )
-except ImportError:  # Allows `python formula_ocr_app/app.py`.
+except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
+    if exc.name != "formula_ocr_app":
+        raise
+    from download_utils import (
+        VerifiedDownloadFailure,
+        download_verified_file,
+        ensure_safe_directory,
+        file_is_valid,
+        model_files_are_valid,
+        raise_model_download_error,
+        sha256_file,
+    )
+    from interprocess_lock import InterProcessFileLock
     from runtime_paths import bundled_external_model_dir, external_model_dir
 
 
@@ -87,13 +103,16 @@ def ensure_rapid_model(
         _notify(progress_callback, total, total)
         return bundled
 
-    root.parent.mkdir(parents=True, exist_ok=True)
-    lock = FileLock(str(root.with_suffix(".lock")))
+    ensure_safe_directory(root.parent)
+    lock = InterProcessFileLock(
+        root.with_suffix(".lock"),
+        on_wait=lambda: _notify(progress_callback, 0, total),
+    )
     with lock:
         if _model_files_are_valid(root, verify_hash=True):
             _notify(progress_callback, total, total)
             return root
-        root.mkdir(parents=True, exist_ok=True)
+        ensure_safe_directory(root)
         bundled = bundled_external_model_dir("RapidLaTeXOCR")
         if bundled is not None and _model_files_are_valid(bundled, verify_hash=True):
             _notify(progress_callback, total, total)
@@ -126,78 +145,53 @@ def _download_file(
     total: int,
     callback: RapidProgressCallback | None,
 ) -> None:
-    partial = path.with_suffix(path.suffix + ".part")
-    offset = partial.stat().st_size if partial.is_file() else 0
-    if offset >= spec.size:
-        partial.unlink(missing_ok=True)
-        offset = 0
-    headers = {"User-Agent": "FormulaOCR/2.0"}
-    if offset:
-        headers["Range"] = f"bytes={offset}-"
-    try:
-        response = requests.get(
-            spec.url,
-            stream=True,
-            timeout=(20, 120),
-            headers=headers,
-        )
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise RuntimeError(f"RapidLaTeXOCR 模型下载失败：{spec.name}\n{exc}") from exc
+    import requests
 
-    append = offset > 0 and response.status_code == 206
-    if not append:
-        offset = 0
-    mode = "ab" if append else "wb"
+    partial = path.with_suffix(path.suffix + ".part")
     try:
-        last_report = 0.0
-        _notify(callback, completed + offset, total)
-        with partial.open(mode) as file:
-            for chunk in response.iter_content(CHUNK_SIZE):
-                if not chunk:
-                    continue
-                file.write(chunk)
-                offset += len(chunk)
-                now = time.monotonic()
-                if now - last_report >= 0.5 or offset >= spec.size:
-                    _notify(callback, completed + offset, total)
-                    last_report = now
-    except (OSError, requests.RequestException) as exc:
-        raise RuntimeError(
-            f"RapidLaTeXOCR 下载中断，进度已保留：{partial}\n{exc}"
-        ) from exc
-    finally:
-        response.close()
-    if offset != spec.size or _sha256(partial) != spec.sha256:
-        partial.unlink(missing_ok=True)
-        raise RuntimeError(f"RapidLaTeXOCR 文件校验失败：{spec.name}")
-    os.replace(partial, path)
+        download_verified_file(
+            spec,
+            path,
+            partial=partial,
+            completed=completed,
+            total=total,
+            notify=lambda downloaded, expected: _notify(
+                callback, downloaded, expected
+            ),
+            request_get=requests.get,
+            request_exception=requests.RequestException,
+            timeout=(20, 120),
+            chunk_size=CHUNK_SIZE,
+        )
+    except VerifiedDownloadFailure as failure:
+        raise_model_download_error(
+            failure,
+            error_type=RuntimeError,
+            label="RapidLaTeXOCR",
+        )
 
 
 def _file_is_valid(
     path: Path, spec: RapidModelFile, *, verify_hash: bool
 ) -> bool:
-    try:
-        if path.is_symlink() or path.stat().st_size != spec.size:
-            return False
-        return not verify_hash or _sha256(path) == spec.sha256
-    except OSError:
-        return False
+    return file_is_valid(
+        path,
+        spec.size,
+        spec.sha256,
+        verify_hash=verify_hash,
+    )
 
 
 def _model_files_are_valid(root: Path, *, verify_hash: bool) -> bool:
-    return all(
-        _file_is_valid(root / spec.name, spec, verify_hash=verify_hash)
-        for spec in RAPID_MODEL_FILES
+    return model_files_are_valid(
+        root,
+        RAPID_MODEL_FILES,
+        verify_hash=verify_hash,
     )
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        while chunk := file.read(CHUNK_SIZE):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha256_file(path, chunk_size=CHUNK_SIZE)
 
 
 def _notify(

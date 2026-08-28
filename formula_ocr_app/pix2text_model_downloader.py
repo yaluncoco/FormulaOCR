@@ -1,23 +1,39 @@
 from __future__ import annotations
 
-import hashlib
-import os
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-import requests
-from filelock import FileLock
-
 try:
-    from formula_ocr_app.model_downloader import DownloadProgressCallback
+    from formula_ocr_app.download_utils import (
+        VerifiedDownloadFailure,
+        download_verified_file,
+        ensure_safe_directory,
+        file_is_valid,
+        model_files_are_valid,
+        raise_model_download_error,
+        sha256_file,
+    )
+    from formula_ocr_app.interprocess_lock import InterProcessFileLock
+    from formula_ocr_app.model_api import DownloadProgressCallback
     from formula_ocr_app.runtime_paths import (
         bundled_external_model_dir,
         external_model_dir,
     )
-except ImportError:  # Allows `python formula_ocr_app/app.py`.
-    from model_downloader import DownloadProgressCallback
+except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
+    if exc.name != "formula_ocr_app":
+        raise
+    from download_utils import (
+        VerifiedDownloadFailure,
+        download_verified_file,
+        ensure_safe_directory,
+        file_is_valid,
+        model_files_are_valid,
+        raise_model_download_error,
+        sha256_file,
+    )
+    from interprocess_lock import InterProcessFileLock
+    from model_api import DownloadProgressCallback
     from runtime_paths import bundled_external_model_dir, external_model_dir
 
 
@@ -123,8 +139,11 @@ def ensure_pix2text_model(
         _notify(progress_callback, PIX2TEXT_TOTAL_SIZE, PIX2TEXT_TOTAL_SIZE)
         return bundled
 
-    root.parent.mkdir(parents=True, exist_ok=True)
-    lock = FileLock(str(root.with_suffix(".lock")))
+    ensure_safe_directory(root.parent)
+    lock = InterProcessFileLock(
+        root.with_suffix(".lock"),
+        on_wait=lambda: _notify(progress_callback, 0, PIX2TEXT_TOTAL_SIZE),
+    )
 
     with lock:
         completed = 0
@@ -135,9 +154,11 @@ def ensure_pix2text_model(
         if bundled is not None and _model_files_are_valid(bundled, verify_hash=True):
             _notify(progress_callback, PIX2TEXT_TOTAL_SIZE, PIX2TEXT_TOTAL_SIZE)
             return bundled
-        root.mkdir(parents=True, exist_ok=True)
-        downloads_dir = root.parent / ".downloads" / PIX2TEXT_MODEL_ID
-        downloads_dir.mkdir(parents=True, exist_ok=True)
+        ensure_safe_directory(root)
+        downloads_root = root.parent / ".downloads"
+        ensure_safe_directory(downloads_root)
+        downloads_dir = downloads_root / PIX2TEXT_MODEL_ID
+        ensure_safe_directory(downloads_dir)
         for item in PIX2TEXT_MODEL_FILES:
             destination = root / item.name
             if _file_is_valid(destination, item, verify_hash=True):
@@ -168,68 +189,29 @@ def _download_file(
     total: int,
     callback: DownloadProgressCallback | None,
 ) -> None:
+    import requests
+
     partial = downloads_dir / f"{item.name}.part"
-    offset = partial.stat().st_size if partial.is_file() else 0
-    if offset >= item.size:
-        partial.unlink(missing_ok=True)
-        offset = 0
-
-    headers = {"User-Agent": "FormulaOCR/2.0"}
-    if offset:
-        headers["Range"] = f"bytes={offset}-"
     try:
-        response = requests.get(
-            item.url,
-            stream=True,
-            timeout=(20, 180),
-            headers=headers,
+        download_verified_file(
+            item,
+            destination,
+            partial=partial,
+            completed=completed,
+            total=total,
+            notify=lambda downloaded, expected: _notify(
+                callback, downloaded, expected
+            ),
+            request_get=requests.get,
+            request_exception=requests.RequestException,
+            chunk_size=CHUNK_SIZE,
         )
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise Pix2TextModelDownloadError(
-            f"Pix2Text MFR 模型下载失败：{item.name}\n{exc}"
-        ) from exc
-
-    append = offset > 0 and response.status_code == 206
-    if not append:
-        offset = 0
-    mode = "ab" if append else "wb"
-    try:
-        _notify(callback, downloaded=completed + offset, total=total)
-        last_report = 0.0
-        with partial.open(mode) as stream:
-            for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
-                if not chunk:
-                    continue
-                stream.write(chunk)
-                offset += len(chunk)
-                now = time.monotonic()
-                if now - last_report >= 0.5 or offset >= item.size:
-                    _notify(
-                        callback,
-                        completed + offset,
-                        total,
-                    )
-                    last_report = now
-    except (OSError, requests.RequestException) as exc:
-        raise Pix2TextModelDownloadError(
-            f"Pix2Text MFR 下载中断，进度已保留：{partial}\n{exc}"
-        ) from exc
-    finally:
-        response.close()
-
-    if offset != item.size or _sha256(partial) != item.sha256:
-        partial.unlink(missing_ok=True)
-        raise Pix2TextModelDownloadError(
-            f"Pix2Text MFR 文件校验失败：{item.name}"
+    except VerifiedDownloadFailure as failure:
+        raise_model_download_error(
+            failure,
+            error_type=Pix2TextModelDownloadError,
+            label="Pix2Text MFR",
         )
-    try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(partial, destination)
-    except OSError as exc:
-        raise Pix2TextModelDownloadError(
-            f"无法保存 Pix2Text MFR 文件：{destination}\n{exc}"
-        ) from exc
 
 
 def _file_is_valid(
@@ -238,29 +220,24 @@ def _file_is_valid(
     *,
     verify_hash: bool,
 ) -> bool:
-    try:
-        if path.is_symlink() or not path.is_file():
-            return False
-        if path.stat().st_size != item.size:
-            return False
-        return not verify_hash or _sha256(path) == item.sha256
-    except OSError:
-        return False
+    return file_is_valid(
+        path,
+        item.size,
+        item.sha256,
+        verify_hash=verify_hash,
+    )
 
 
 def _model_files_are_valid(root: Path, *, verify_hash: bool) -> bool:
-    return all(
-        _file_is_valid(root / item.name, item, verify_hash=verify_hash)
-        for item in PIX2TEXT_MODEL_FILES
+    return model_files_are_valid(
+        root,
+        PIX2TEXT_MODEL_FILES,
+        verify_hash=verify_hash,
     )
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(CHUNK_SIZE):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha256_file(path, chunk_size=CHUNK_SIZE)
 
 
 def _notify(

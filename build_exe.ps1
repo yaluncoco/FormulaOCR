@@ -110,9 +110,56 @@ function Invoke-PackagedSelfTest {
         [string]$Executable
     )
     Write-Host "Running packaged $Name..."
-    & $Executable $Argument
-    if ($LASTEXITCODE -ne 0) {
-        throw "Packaged $Name failed with exit code $LASTEXITCODE"
+    $testOutputRoot = Join-Path $root "build\packaged-self-tests"
+    New-Item -ItemType Directory -Force -Path $testOutputRoot | Out-Null
+    $slug = (($Name -replace '[^A-Za-z0-9]+', '-').Trim('-')).ToLowerInvariant()
+    $stdoutFile = Join-Path $testOutputRoot "$slug.out.txt"
+    $stderrFile = Join-Path $testOutputRoot "$slug.err.txt"
+    Remove-Item -LiteralPath $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
+    $process = Start-Process `
+        -FilePath $Executable `
+        -ArgumentList @($Argument) `
+        -WorkingDirectory (Split-Path -Parent $Executable) `
+        -NoNewWindow `
+        -Wait `
+        -PassThru `
+        -RedirectStandardOutput $stdoutFile `
+        -RedirectStandardError $stderrFile
+    if (Test-Path $stdoutFile) {
+        Get-Content -LiteralPath $stdoutFile
+    }
+    if (Test-Path $stderrFile) {
+        Get-Content -LiteralPath $stderrFile | Write-Host
+    }
+    if ($process.ExitCode -ne 0) {
+        throw "Packaged $Name failed with exit code $($process.ExitCode)"
+    }
+}
+
+function Assert-PackagedRuntimeBoundary {
+    param([string]$InternalDirectory)
+
+    $forbiddenRelativePaths = @(
+        "paddleocr",
+        "paddlex",
+        "cv2",
+        "rapid_latex_ocr",
+        "filelock",
+        "chardet",
+        "setuptools",
+        "coloredlogs",
+        "humanfriendly",
+        "flatbuffers",
+        "sympy",
+        "mpmath",
+        "sqlite3.dll",
+        "_sqlite3.pyd"
+    )
+    foreach ($relativePath in $forbiddenRelativePaths) {
+        $candidate = Join-Path $InternalDirectory $relativePath
+        if (Test-Path -LiteralPath $candidate) {
+            throw "Unexpected packaged dependency: $candidate"
+        }
     }
 }
 
@@ -135,17 +182,32 @@ if (-not (Test-Path $internalDir)) {
     throw "PyInstaller output directory not found: $internalDir"
 }
 
+Assert-PackagedRuntimeBoundary $internalDir
+
 Invoke-PackagedSelfTest "runtime boundary self-test" "--runtime-self-test" $builtExe
 Invoke-PackagedSelfTest "UI self-test" "--ui-self-test" $builtExe
 Invoke-PackagedSelfTest "Word/MathML regression" "--word-mathml-self-test" $builtExe
+$previewBrowser = Find-Browser
+if ($previewBrowser) {
+    Invoke-PackagedSelfTest "MathML preview self-test" "--preview-self-test" $builtExe
+} else {
+    Write-Warning "Skipping packaged MathML preview self-test because Edge/Chrome was not found."
+}
 
 $buildBytes = (
     Get-ChildItem -LiteralPath (Join-Path $root "dist\FormulaOCR") -Recurse -File |
         Measure-Object -Property Length -Sum
 ).Sum
 $buildMiB = [Math]::Round($buildBytes / 1MB, 1)
+if (
+    -not $env:FORMULA_OCR_BUNDLED_PADDLE_MODELS -and
+    -not $env:FORMULA_OCR_BUNDLED_ONNX_MODELS -and
+    $buildMiB -gt 450
+) {
+    throw "Package size regression: $buildMiB MiB exceeds the 450 MiB boundary"
+}
 
 Write-Host "Built: $builtExe"
 Write-Host "Package size: $buildMiB MiB"
-Write-Host "Models are downloaded on first use and cached under LocalAppData\FormulaOCR."
+Write-Host "Models are downloaded from Model Management and cached under LocalAppData\FormulaOCR."
 Write-Host "Distribute the complete dist\FormulaOCR directory; the EXE depends on _internal."

@@ -41,8 +41,8 @@ MODEL_QUICK_FILTERS = (
     ("onnx", "ONNX"),
 )
 MODEL_BACKEND_LABELS = {
-    "paddle": "Paddle / PaddleX",
-    "paddle_hf": "Paddle + Hugging Face",
+    "paddle": "Paddle Inference",
+    "paddle_hf": "Paddle Inference / Hugging Face",
     "rapid_onnx": "ONNX Runtime / RapidLaTeXOCR",
     "mathcraft_onnx": "ONNX Runtime / MathCraft",
     "pix2text_onnx": "ONNX Runtime / Pix2Text",
@@ -269,8 +269,11 @@ MODEL_SPECS = (
         family="LaTeX-OCR",
         archive_size=178_952_787,
         archive_crc32=None,
-        description="社区经典 pix2tex 路线的 ONNX Runtime 版本，适合 Windows CPU。",
-        best_for="英文印刷公式、轻量备选",
+        description=(
+            "社区经典 pix2tex 路线的 ONNX Runtime 版本，适合 Windows CPU；"
+            "复杂多行和分段结构的准确率弱于 PP-FormulaNet+。"
+        ),
+        best_for="英文单行印刷公式、轻量备选",
         languages="英文为主",
         backend="rapid_onnx",
     ),

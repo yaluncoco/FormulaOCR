@@ -18,7 +18,9 @@ try:
         build_word_clipboard_payload,
         _custom_format_bytes,
     )
-except ImportError:  # Allows `python formula_ocr_app/app.py`.
+except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
+    if exc.name != "formula_ocr_app":
+        raise
     from formula_formats import (
         clean_recognized_latex,
         latex_to_mathml,
@@ -276,6 +278,12 @@ def run_word_mathml_regression() -> list[str]:
         )
     if clean_recognized_latex(r"f'(x)") != r"f'(x)":
         failures.append("quote_separator_cleanup: changed real prime notation")
+    for legal_prime in (r"{f}'x", r"x_{i}'y_{j}", r"F_{i}'F_{j}"):
+        if clean_recognized_latex(legal_prime) != legal_prime:
+            failures.append(
+                "quote_separator_cleanup: changed legal prime notation "
+                + legal_prime
+            )
     try:
         word_mathml = mathml_to_word_mathml(latex_to_mathml(cleaned_quote_separator))
         ElementTree.fromstring(word_mathml)
