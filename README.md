@@ -11,6 +11,8 @@ FormulaOCR 是一个本地运行的多模型公式识别工具。它通过精简
 
 - 打开本地公式图片、粘贴剪贴板图片或框选截图。
 - 粘贴新图片时会清理上一张图片的旧结果，并阻止微信等软件的临时图片路径进入 LaTeX/MathML。
+- LaTeX 结果支持直接键盘编辑、撤销/重做、全选和右键菜单，修改后自动刷新 MathML 预览。
+- 启动后会在后台检查 GitHub 正式版更新，也可点击“检查更新”手动查询并打开新版安装包下载。
 - 内置模型目录：12 个模型、8 个供应商，覆盖百度飞桨 `PP-FormulaNet/PP-FormulaNet+`、PaddlePaddle 官方 `LaTeX-OCR Rec`、上海 AI Lab `UniMERNet`、OpenDataLab/Cooper114 的量化 `UniMERNet Small ONNX`、RapidAI `RapidLaTeXOCR`、SakuraMathcraft `MathCraft Formula ONNX`、Breezedeus `Pix2Text MFR 1.5` 和 MixTeX `ZhEn`。
 - 主界面的模型下拉框只显示已下载或随包内置的模型，用于快速切换当前识别模型，选择结果会持久保存；已删除或尚未下载的旧选择不会被隐式使用。
 - “模型管理”负责浏览和下载完整模型目录，可按供应商、模型名称、使用场景和快捷标签筛选，查看状态、模型 ID、后端、用户缓存位置和下载源，并删除单个用户缓存或打开缓存目录。
@@ -39,6 +41,8 @@ formula_ocr_app/
   recognition_tests.py    # 识别后处理、下载和模型切换回归测试
   model_catalog.py        # 模型供应商、场景、大小和后端目录
   app_settings.py         # 用户模型选择与条款确认持久化
+  app_update.py           # GitHub 正式版查询、版本比较与可信下载地址解析
+  update_tests.py         # 更新查询与版本比较回归测试
   model_downloader.py      # Paddle 官方归档下载、CRC 校验与安全解压
   download_utils.py       # 多后端共用的断点下载、SHA-256 和原子安装
   interprocess_lock.py    # 下载器共用的轻量跨进程文件锁
@@ -122,7 +126,7 @@ python -m formula_ocr_app.app
 Windows 用户可以直接从 [GitHub Releases](https://github.com/yaluncoco/FormulaOCR/releases) 下载：
 
 ```text
-FormulaOCRSetup-1.1.0.exe
+FormulaOCRSetup-1.1.1.exe
 ```
 
 安装程序是 x64 Windows 的 Inno Setup 安装包，默认安装到当前用户目录，不需要管理员权限。安装后可以从开始菜单启动 FormulaOCR；桌面快捷方式在安装时可选。卸载时默认保留模型、设置和日志，避免重新安装后重复下载；如果确认不再需要，也可以选择同时清理 `%LOCALAPPDATA%\FormulaOCR`。
@@ -132,8 +136,8 @@ FormulaOCRSetup-1.1.0.exe
 每个 Release 同时提供 `.sha256` 校验文件。下载后可在 PowerShell 中验证：
 
 ```powershell
-Get-FileHash .\FormulaOCRSetup-1.1.0.exe -Algorithm SHA256
-Get-Content .\FormulaOCRSetup-1.1.0.exe.sha256
+Get-FileHash .\FormulaOCRSetup-1.1.1.exe -Algorithm SHA256
+Get-Content .\FormulaOCRSetup-1.1.1.exe.sha256
 ```
 
 当前公开 Release 安装程序未进行商业代码签名，Windows SmartScreen 在下载量较少时可能显示“未知发布者”。请仅从本项目 Releases 下载，并用 SHA-256 文件核对完整性。
@@ -172,7 +176,7 @@ $env:FORMULA_OCR_CONDA_ENV = "D:\anaconda3\envs\formula_ocr"
 .\build_installer.ps1
 ```
 
-`build_installer.ps1` 会先构建并自检 `dist\FormulaOCR`，再生成 `dist\installer\FormulaOCRSetup-1.1.0.exe` 和对应 SHA-256 文件。公开仓库的 `.github/workflows/release.yml` 会在推送 `v*` 标签时于干净的 Windows runner 上根据 `requirements.txt` 重复这个流程并自动上传 Release 资产；不需要把第三方 OCR 源码或模型权重提交到仓库。
+`build_installer.ps1` 会先构建并自检 `dist\FormulaOCR`，再生成 `dist\installer\FormulaOCRSetup-1.1.1.exe` 和对应 SHA-256 文件。公开仓库的 `.github/workflows/release.yml` 会在推送 `v*` 标签时于干净的 Windows runner 上根据 `requirements.txt` 重复这个流程并自动上传 Release 资产；不需要把第三方 OCR 源码或模型权重提交到仓库。
 
 打包产物会输出到：
 
@@ -199,6 +203,7 @@ python -m formula_ocr_app.app --ui-self-test
 # 已下载并确认 MixTeX 条款后，可做真实 ONNX smoke test
 python -m formula_ocr_app.app --self-test --self-test-model MixTexZhEn
 python -m formula_ocr_app.recognition_tests
+python -m formula_ocr_app.update_tests
 ```
 
 部分测试依赖 Windows 剪贴板、Word 兼容格式或本地浏览器。

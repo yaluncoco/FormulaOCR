@@ -12,6 +12,7 @@ import threading
 import time
 import tkinter as tk
 import traceback
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -19,6 +20,12 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageGrab, ImageTk
 
 try:
+    from formula_ocr_app import __version__
+    from formula_ocr_app.app_update import (
+        ReleaseInfo,
+        UpdateCheckError,
+        fetch_latest_release,
+    )
     from formula_ocr_app.app_settings import AppSettings, load_settings, save_settings
     from formula_ocr_app.formula_formats import (
         export_formula_docx,
@@ -66,6 +73,8 @@ try:
 except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
     if exc.name != "formula_ocr_app":
         raise
+    from __init__ import __version__
+    from app_update import ReleaseInfo, UpdateCheckError, fetch_latest_release
     from app_settings import AppSettings, load_settings, save_settings
     from formula_formats import (
         export_formula_docx,
@@ -388,7 +397,12 @@ class RecognizerSettings:
 
 
 class FormulaOCRApp(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        auto_check_updates: bool = True,
+        update_fetcher=None,
+    ) -> None:
         super().__init__()
         self.title("公式识别助手")
         self.geometry("1240x780")
@@ -434,6 +448,9 @@ class FormulaOCRApp(tk.Tk):
         self.download_cancel_event = threading.Event()
         self.is_destroying = False
         self.model_manager_window: tk.Toplevel | None = None
+        self.update_check_thread: threading.Thread | None = None
+        self.update_check_after_id: str | None = None
+        self._update_fetcher = update_fetcher or fetch_latest_release
         self.capture_after_id: str | None = None
         self.screenshot_selector: ScreenshotSelector | None = None
 
@@ -443,6 +460,11 @@ class FormulaOCRApp(tk.Tk):
         self._bind_shortcuts()
         self._schedule_worker_poll()
         self._schedule_mathml_preview_poll()
+        if auto_check_updates:
+            self.update_check_after_id = self.after(
+                2200,
+                lambda: self.check_for_updates(interactive=False),
+            )
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self)
@@ -555,7 +577,7 @@ class FormulaOCRApp(tk.Tk):
         )
         tk.Label(
             title_group,
-            text="图片公式转 LaTeX，本地多模型识别",
+            text=f"图片公式转 LaTeX，本地多模型识别  ·  v{__version__}",
             bg=APP_BG,
             fg=TEXT_SECONDARY,
             font=("Microsoft YaHei UI", 10),
@@ -590,6 +612,18 @@ class FormulaOCRApp(tk.Tk):
             border=BORDER,
         )
         self.model_manager_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.update_button = RoundedButton(
+            model_bar,
+            text="检查更新",
+            command=self.check_for_updates,
+            width=88,
+            height=38,
+            radius=13,
+            bg="#ffffff",
+            active_bg=ACCENT_SOFT,
+            border=BORDER,
+        )
+        self.update_button.pack(side=tk.LEFT, padx=(8, 0))
         self.recognize_button = RoundedButton(
             model_bar,
             text="识别",
@@ -838,11 +872,23 @@ class FormulaOCRApp(tk.Tk):
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             latex_header,
-            text="可编辑",
+            text="点击文本可直接修改",
             bg=PANEL_BG,
             fg=TEXT_SECONDARY,
             font=("Microsoft YaHei UI", 9),
-        ).grid(row=0, column=1, sticky="e")
+        ).grid(row=0, column=1, sticky="e", padx=(8, 8))
+        self.latex_edit_button = RoundedButton(
+            latex_header,
+            text="编辑 LaTeX",
+            command=self.focus_latex_editor,
+            width=94,
+            height=30,
+            radius=10,
+            bg="#ffffff",
+            active_bg=ACCENT_SOFT,
+            border=BORDER,
+        )
+        self.latex_edit_button.grid(row=0, column=2, sticky="e")
 
         latex_frame = tk.Frame(
             latex_section,
@@ -859,7 +905,12 @@ class FormulaOCRApp(tk.Tk):
             wrap=tk.WORD,
             font=("Consolas", 12),
             undo=True,
+            autoseparators=True,
+            maxundo=-1,
             height=1,
+            state=tk.NORMAL,
+            takefocus=True,
+            cursor="xterm",
             bg="#fbfdff",
             fg=TEXT_PRIMARY,
             insertbackground=TEXT_PRIMARY,
@@ -869,6 +920,43 @@ class FormulaOCRApp(tk.Tk):
             pady=12,
         )
         self.output_text.grid(row=0, column=0, sticky="nsew")
+        self.latex_edit_menu = tk.Menu(
+            self,
+            tearoff=0,
+            bg="#ffffff",
+            fg=TEXT_PRIMARY,
+            activebackground=ACCENT_SOFT,
+            activeforeground=TEXT_PRIMARY,
+            relief=tk.FLAT,
+            borderwidth=1,
+            font=("Microsoft YaHei UI", 10),
+        )
+        self.latex_edit_menu.add_command(label="撤销", command=self._latex_undo)
+        self.latex_edit_menu.add_command(label="重做", command=self._latex_redo)
+        self.latex_edit_menu.add_separator()
+        self.latex_edit_menu.add_command(
+            label="剪切",
+            command=lambda: self.output_text.event_generate("<<Cut>>"),
+        )
+        self.latex_edit_menu.add_command(
+            label="复制",
+            command=lambda: self.output_text.event_generate("<<Copy>>"),
+        )
+        self.latex_edit_menu.add_command(
+            label="粘贴",
+            command=self._paste_latex_or_image,
+        )
+        self.latex_edit_menu.add_separator()
+        self.latex_edit_menu.add_command(
+            label="全选",
+            command=self._select_all_latex,
+        )
+        self.output_text.bind("<Button-1>", self._activate_latex_editor, add="+")
+        self.output_text.bind("<Button-3>", self._show_latex_edit_menu, add="+")
+        self.output_text.bind("<Control-a>", self._select_all_latex, add="+")
+        self.output_text.bind("<Control-z>", self._latex_undo, add="+")
+        self.output_text.bind("<Control-y>", self._latex_redo, add="+")
+        self.output_text.bind("<Control-Shift-Z>", self._latex_redo, add="+")
         self.latex_scrollbar = SlimScrollbar(
             latex_frame, command=self.output_text.yview
         )
@@ -986,6 +1074,64 @@ class FormulaOCRApp(tk.Tk):
         self.copy_latex()
         return "break"
 
+    def _activate_latex_editor(self, _event: tk.Event | None = None) -> None:
+        # Keep the result editor writable even if a future workflow temporarily
+        # changes widget state.  The Text class binding still handles cursor
+        # placement because this widget binding intentionally does not break.
+        if str(self.output_text.cget("state")) != str(tk.NORMAL):
+            self.output_text.configure(state=tk.NORMAL)
+
+    def focus_latex_editor(self) -> None:
+        self._activate_latex_editor()
+        self.output_text.focus_set()
+        self.output_text.mark_set(tk.INSERT, "end-1c")
+        self.output_text.see(tk.INSERT)
+        self.status_var.set("LaTeX 结果可直接编辑，修改后预览会自动刷新")
+
+    def _select_all_latex(self, _event: tk.Event | None = None) -> str:
+        self._activate_latex_editor()
+        self.output_text.focus_set()
+        self.output_text.tag_add(tk.SEL, "1.0", "end-1c")
+        self.output_text.mark_set(tk.INSERT, "end-1c")
+        self.output_text.see(tk.INSERT)
+        return "break"
+
+    def _latex_undo(self, _event: tk.Event | None = None) -> str:
+        self._activate_latex_editor()
+        self.output_text.focus_set()
+        try:
+            self.output_text.edit_undo()
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _latex_redo(self, _event: tk.Event | None = None) -> str:
+        self._activate_latex_editor()
+        self.output_text.focus_set()
+        try:
+            self.output_text.edit_redo()
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _paste_latex_or_image(self) -> None:
+        handled, _loaded = self._paste_image_from_clipboard(
+            notify_if_missing=False
+        )
+        if not handled:
+            self._activate_latex_editor()
+            self.output_text.focus_set()
+            self.output_text.event_generate("<<Paste>>")
+
+    def _show_latex_edit_menu(self, event: tk.Event) -> str:
+        self._activate_latex_editor()
+        self.output_text.focus_set()
+        try:
+            self.latex_edit_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.latex_edit_menu.grab_release()
+        return "break"
+
     def _on_model_changed(self, _event: tk.Event | None = None) -> None:
         model_id = self._selected_model_id()
         if not model_id or not is_model_cached(model_id, verify_hash=False):
@@ -1071,6 +1217,129 @@ class FormulaOCRApp(tk.Tk):
             f"{spec.model_id} · {spec.best_for} · {spec.languages} · {state}{terms}"
         )
         self.model_picker.refresh()
+
+    def check_for_updates(self, *, interactive: bool = True) -> None:
+        scheduled_check = self.update_check_after_id
+        self.update_check_after_id = None
+        if scheduled_check is not None:
+            try:
+                self.after_cancel(scheduled_check)
+            except tk.TclError:
+                pass
+        if self.is_destroying:
+            return
+        # Keep the request reserved until its queued result is handled on the
+        # Tk thread. A very fast network response must not allow a second click
+        # to start a duplicate request before the queue poll runs.
+        if self.update_check_thread is not None:
+            if interactive:
+                self.status_var.set("正在检查更新，请稍候...")
+            return
+        self.update_button.set_disabled(True)
+        if interactive:
+            self.status_var.set("正在连接 GitHub 检查更新...")
+        thread = threading.Thread(
+            target=self._check_for_updates_worker,
+            args=(interactive,),
+            daemon=True,
+        )
+        self.update_check_thread = thread
+        thread.start()
+
+    def _check_for_updates_worker(self, interactive: bool) -> None:
+        try:
+            release = self._update_fetcher(__version__)
+            if not isinstance(release, ReleaseInfo):
+                raise UpdateCheckError("更新服务返回了无法识别的版本信息。")
+            self.worker_queue.put(
+                (
+                    "update_ready",
+                    {"release": release, "interactive": interactive},
+                )
+            )
+        except Exception as exc:
+            details = "".join(traceback.format_exception(exc)).strip()
+            write_log(f"Update check failed\n{details}")
+            self.worker_queue.put(
+                (
+                    "update_error",
+                    {
+                        "message": str(exc).strip() or type(exc).__name__,
+                        "interactive": interactive,
+                    },
+                )
+            )
+
+    def _finish_update_check(self) -> None:
+        self.update_check_thread = None
+        if not self.is_destroying:
+            self.update_button.set_disabled(False)
+
+    def _handle_update_ready(
+        self,
+        release: ReleaseInfo,
+        *,
+        interactive: bool,
+    ) -> None:
+        self._finish_update_check()
+        if not release.update_available:
+            if interactive:
+                messagebox.showinfo(
+                    "检查更新",
+                    f"当前版本 v{__version__} 已是最新正式版。",
+                    parent=self,
+                )
+                self.status_var.set(f"当前已是最新版本 v{__version__}")
+            return
+
+        notes = self._release_notes_excerpt(release.notes)
+        target = release.installer_url or release.release_url
+        action = "下载 Windows 安装包" if release.installer_url else "打开发布页面"
+        message = (
+            f"发现新版本 v{release.latest_version}\n"
+            f"当前版本：v{release.current_version}\n\n"
+        )
+        if notes:
+            message += f"更新说明：\n{notes}\n\n"
+        message += f"是否立即{action}？"
+        if messagebox.askyesno("发现新版本", message, parent=self):
+            try:
+                self._open_update_url(target)
+            except UpdateCheckError as exc:
+                messagebox.showerror("无法打开更新", str(exc), parent=self)
+                self.status_var.set("无法打开更新地址")
+                return
+            self.status_var.set(
+                f"已打开 FormulaOCR v{release.latest_version} 更新下载"
+            )
+        else:
+            self.status_var.set(
+                f"已发现 v{release.latest_version}，可稍后点击“检查更新”"
+            )
+
+    def _handle_update_error(self, message: str, *, interactive: bool) -> None:
+        self._finish_update_check()
+        if not interactive:
+            return
+        friendly = message or "无法连接 GitHub 检查更新，请稍后重试。"
+        messagebox.showwarning("检查更新失败", friendly, parent=self)
+        self.status_var.set("检查更新失败，请稍后重试")
+
+    @staticmethod
+    def _release_notes_excerpt(notes: str, *, limit: int = 700) -> str:
+        lines = [line.strip() for line in notes.splitlines() if line.strip()]
+        text = "\n".join(lines)
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + "\n…"
+
+    def _open_update_url(self, url: str) -> None:
+        try:
+            opened = webbrowser.open(url, new=2)
+        except (OSError, ValueError, webbrowser.Error) as exc:
+            raise UpdateCheckError("无法打开更新下载地址。") from exc
+        if opened is False:
+            raise UpdateCheckError("系统没有可用的浏览器来打开更新地址。")
 
     def show_model_manager(self) -> None:
         manager_exists = False
@@ -1628,10 +1897,12 @@ class FormulaOCRApp(tk.Tk):
     def _replace_output_text(self, text: str, *, reset_undo: bool = True) -> None:
         """Programmatically replace LaTeX without scheduling a second preview."""
 
+        self._activate_latex_editor()
         self.output_text.edit_modified(False)
         self.output_text.delete("1.0", tk.END)
         if text:
             self.output_text.insert("1.0", text)
+        self.output_text.mark_set(tk.INSERT, "end-1c")
         if reset_undo:
             self.output_text.edit_reset()
         self.output_text.edit_modified(False)
@@ -1715,6 +1986,33 @@ class FormulaOCRApp(tk.Tk):
                 kind, payload = self.worker_queue.get_nowait()
             except queue.Empty:
                 break
+
+        if kind == "update_ready":
+            if isinstance(payload, dict) and isinstance(
+                payload.get("release"), ReleaseInfo
+            ):
+                self._handle_update_ready(
+                    payload["release"],
+                    interactive=bool(payload.get("interactive", False)),
+                )
+            else:
+                self._handle_update_error(
+                    "更新服务返回了无法识别的版本信息。",
+                    interactive=True,
+                )
+            self._schedule_worker_poll()
+            return
+
+        if kind == "update_error":
+            if isinstance(payload, dict):
+                self._handle_update_error(
+                    str(payload.get("message", "")),
+                    interactive=bool(payload.get("interactive", False)),
+                )
+            else:
+                self._handle_update_error(str(payload), interactive=True)
+            self._schedule_worker_poll()
+            return
 
         if kind == "progress":
             self.busy_status_message = str(payload)
@@ -2234,6 +2532,12 @@ class FormulaOCRApp(tk.Tk):
         # downloader keeps its `.part` file, so closing the window is safe.
         self.download_cancel_event.set()
         self._cancel_pending_mathml_render()
+        if self.update_check_after_id is not None:
+            try:
+                self.after_cancel(self.update_check_after_id)
+            except tk.TclError:
+                pass
+            self.update_check_after_id = None
         if self.capture_after_id is not None:
             try:
                 self.after_cancel(self.capture_after_id)
@@ -2616,7 +2920,7 @@ def run_preview_self_test() -> None:
     )
     args, _unknown = parser.parse_known_args(sys.argv[1:])
 
-    app = FormulaOCRApp()
+    app = FormulaOCRApp(auto_check_updates=False)
     app.withdraw()
     try:
         mathml = latex_to_mathml(args.preview_formula)
@@ -2634,7 +2938,7 @@ def run_preview_self_test() -> None:
 
 
 def run_ui_self_test() -> None:
-    app = FormulaOCRApp()
+    app = FormulaOCRApp(auto_check_updates=False)
     app.withdraw()
 
     def assert_popup_position(
@@ -2686,6 +2990,108 @@ def run_ui_self_test() -> None:
         if app.worker_poll_after_id is not None:
             app.after_cancel(app.worker_poll_after_id)
             app.worker_poll_after_id = None
+
+        app.deiconify()
+        app.update()
+        app._replace_output_text("x")
+        app.focus_latex_editor()
+        app.update()
+        if str(app.output_text.cget("state")) != str(tk.NORMAL):
+            raise RuntimeError("LaTeX 结果框不是可编辑状态。")
+        if app.focus_get() is not app.output_text:
+            raise RuntimeError("编辑 LaTeX 按钮没有把焦点交给结果框。")
+        app.output_text.event_generate("<KeyPress-a>")
+        app.update()
+        if app._current_latex() != "xa":
+            raise RuntimeError("LaTeX 结果框无法接收真实键盘输入。")
+        app._latex_undo()
+        app.update()
+        if app._current_latex() != "x":
+            raise RuntimeError("LaTeX 结果框撤销操作不可用。")
+        app._latex_redo()
+        app.update()
+        if app._current_latex() != "xa":
+            raise RuntimeError("LaTeX 结果框重做操作不可用。")
+        app._select_all_latex()
+        if tuple(str(item) for item in app.output_text.tag_ranges(tk.SEL)) != (
+            app.output_text.index("1.0"),
+            app.output_text.index("end-1c"),
+        ):
+            raise RuntimeError("LaTeX 结果框全选操作不可用。")
+        app.clear_output(update_status=False)
+        app.withdraw()
+
+        original_update_fetcher = app._update_fetcher
+        original_showinfo = messagebox.showinfo
+        original_askyesno = messagebox.askyesno
+        original_open_update_url = app._open_update_url
+        update_notices: list[tuple[str, str]] = []
+        opened_update_urls: list[str] = []
+
+        def finish_update_probe() -> None:
+            thread = app.update_check_thread
+            if thread is None:
+                raise RuntimeError("检查更新按钮没有启动后台线程。")
+            thread.join(timeout=3)
+            if thread.is_alive():
+                raise RuntimeError("检查更新后台线程没有及时结束。")
+            app._poll_worker_queue()
+            if app.worker_poll_after_id is not None:
+                app.after_cancel(app.worker_poll_after_id)
+                app.worker_poll_after_id = None
+
+        try:
+            app._update_fetcher = lambda current: ReleaseInfo(
+                current_version=current,
+                latest_version=current,
+                tag_name=f"v{current}",
+                release_name=f"FormulaOCR {current}",
+                release_url=(
+                    "https://github.com/yaluncoco/FormulaOCR/releases/latest"
+                ),
+                installer_url="",
+                notes="",
+                published_at="",
+            )
+            messagebox.showinfo = lambda title, text, **_kwargs: update_notices.append(
+                (str(title), str(text))
+            )
+            app.update_button.command()
+            finish_update_probe()
+            if not update_notices or "已是最新" not in update_notices[-1][1]:
+                raise RuntimeError("手动检查更新没有报告当前已是最新版。")
+            if app.update_button.is_disabled:
+                raise RuntimeError("检查更新完成后按钮没有恢复。")
+
+            app._update_fetcher = lambda current: ReleaseInfo(
+                current_version=current,
+                latest_version="9.9.9",
+                tag_name="v9.9.9",
+                release_name="FormulaOCR 9.9.9",
+                release_url=(
+                    "https://github.com/yaluncoco/FormulaOCR/releases/tag/v9.9.9"
+                ),
+                installer_url=(
+                    "https://github.com/yaluncoco/FormulaOCR/releases/download/"
+                    "v9.9.9/FormulaOCRSetup-9.9.9.exe"
+                ),
+                notes="更新测试",
+                published_at="",
+            )
+            messagebox.askyesno = lambda *_args, **_kwargs: True
+            app._open_update_url = opened_update_urls.append
+            app.update_button.command()
+            finish_update_probe()
+            if not opened_update_urls or not opened_update_urls[-1].endswith(
+                "FormulaOCRSetup-9.9.9.exe"
+            ):
+                raise RuntimeError("发现新版后没有打开对应安装包下载地址。")
+        finally:
+            app._update_fetcher = original_update_fetcher
+            messagebox.showinfo = original_showinfo
+            messagebox.askyesno = original_askyesno
+            app._open_update_url = original_open_update_url
+
         app._set_busy(True, message="正在下载测试模型...", show_cancel=True)
         app._cancel_download()
         app.worker_queue.put(

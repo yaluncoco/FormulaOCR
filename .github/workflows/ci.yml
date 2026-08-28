@@ -38,6 +38,7 @@ jobs:
         shell: pwsh
         run: |
           python -m unittest formula_ocr_app.recognition_tests
+          python -m unittest formula_ocr_app.update_tests
           python formula_ocr_app\app.py --ui-self-test
           python formula_ocr_app\app.py --word-mathml-self-test
           python formula_ocr_app\app.py --runtime-self-test
