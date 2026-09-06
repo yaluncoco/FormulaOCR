@@ -79,13 +79,14 @@ class FormulaRecognizer:
                 if self._closed:
                     raise RuntimeError("公式识别器已经关闭。")
                 self._prediction_active = True
+            model_name = self.model_name
             try:
-                self._notify_model_load(self.model_name)
-                backend = self._get_backend(self.model_name)
+                self._notify_model_load(model_name)
+                backend = self._get_backend(model_name)
                 latex = clean_recognized_latex(backend.predict(image_path))
                 result = RecognitionResult(
-                    selected_model_name=self.model_name,
-                    model_name=self.model_name,
+                    selected_model_name=model_name,
+                    model_name=model_name,
                     latex=latex,
                 )
                 self.last_result = result
@@ -124,7 +125,11 @@ class FormulaRecognizer:
         if self._backend is not None and self._backend_model_name == model_name:
             return self._backend
         if self._backend is not None:
-            _close_backend_safely(self._backend)
+            # A failed replacement must not leave a closed backend reachable
+            # under its old model name when the caller retries or switches back.
+            previous = self._detach_backend()
+            if previous is not None:
+                _close_backend_safely(previous)
         self._backend = self._create_backend(model_name)
         self._backend_model_name = model_name
         return self._backend

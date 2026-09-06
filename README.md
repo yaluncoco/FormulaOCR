@@ -39,6 +39,7 @@ formula_ocr_app/
   recognizer.py           # 旧导入路径的兼容层
   onnx_runtime.py         # ONNX provider 与 SessionOptions 的统一配置
   recognition_tests.py    # 识别后处理、下载和模型切换回归测试
+  runtime_tests.py        # 并发校验、模型切换失败恢复与解码边界回归测试
   model_catalog.py        # 模型供应商、场景、大小和后端目录
   app_settings.py         # 用户模型选择与条款确认持久化
   app_update.py           # GitHub 正式版查询、版本比较与可信下载地址解析
@@ -126,7 +127,7 @@ python -m formula_ocr_app.app
 Windows 用户可以直接从 [GitHub Releases](https://github.com/yaluncoco/FormulaOCR/releases) 下载：
 
 ```text
-FormulaOCRSetup-1.1.1.exe
+FormulaOCRSetup-1.1.2.exe
 ```
 
 安装程序是 x64 Windows 的 Inno Setup 安装包，默认安装到当前用户目录，不需要管理员权限。安装后可以从开始菜单启动 FormulaOCR；桌面快捷方式在安装时可选。卸载时默认保留模型、设置和日志，避免重新安装后重复下载；如果确认不再需要，也可以选择同时清理 `%LOCALAPPDATA%\FormulaOCR`。
@@ -136,8 +137,8 @@ FormulaOCRSetup-1.1.1.exe
 每个 Release 同时提供 `.sha256` 校验文件。下载后可在 PowerShell 中验证：
 
 ```powershell
-Get-FileHash .\FormulaOCRSetup-1.1.1.exe -Algorithm SHA256
-Get-Content .\FormulaOCRSetup-1.1.1.exe.sha256
+Get-FileHash .\FormulaOCRSetup-1.1.2.exe -Algorithm SHA256
+Get-Content .\FormulaOCRSetup-1.1.2.exe.sha256
 ```
 
 当前公开 Release 安装程序未进行商业代码签名，Windows SmartScreen 在下载量较少时可能显示“未知发布者”。请仅从本项目 Releases 下载，并用 SHA-256 文件核对完整性。
@@ -176,7 +177,7 @@ $env:FORMULA_OCR_CONDA_ENV = "D:\anaconda3\envs\formula_ocr"
 .\build_installer.ps1
 ```
 
-`build_installer.ps1` 会先构建并自检 `dist\FormulaOCR`，再生成 `dist\installer\FormulaOCRSetup-1.1.1.exe` 和对应 SHA-256 文件。公开仓库的 `.github/workflows/release.yml` 会在推送 `v*` 标签时于干净的 Windows runner 上根据 `requirements.txt` 重复这个流程并自动上传 Release 资产；不需要把第三方 OCR 源码或模型权重提交到仓库。
+`build_installer.ps1` 会先构建并自检 `dist\FormulaOCR`，再生成 `dist\installer\FormulaOCRSetup-1.1.2.exe` 和对应 SHA-256 文件。公开仓库的 `.github/workflows/release.yml` 会在推送 `v*` 标签时于干净的 Windows runner 上根据 `requirements.txt` 重复这个流程并自动上传 Release 资产；不需要把第三方 OCR 源码或模型权重提交到仓库。
 
 打包产物会输出到：
 
@@ -204,9 +205,14 @@ python -m formula_ocr_app.app --ui-self-test
 python -m formula_ocr_app.app --self-test --self-test-model MixTexZhEn
 python -m formula_ocr_app.recognition_tests
 python -m formula_ocr_app.update_tests
+python -m formula_ocr_app.runtime_tests
 ```
 
 部分测试依赖 Windows 剪贴板、Word 兼容格式或本地浏览器。
+
+CI 会合并运行三个 unittest 模块，并检查每项桌面自检的退出码，任一步失败都会终止该步骤。运行环境自检需要单独启动 Python 进程，以检查启动阶段的惰性加载。
+
+性能改动、测量范围与后续改进建议见 [2026-09 优化审查记录](docs/optimization-2026-09.md)。
 
 ## 开源致谢
 

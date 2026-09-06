@@ -496,7 +496,7 @@ def show_model_manager_dialog(
             return
         spec = get_model_spec(model_id)
         if not model_has_user_cache_data(model_id):
-            if is_model_bundled_only(model_id):
+            if is_model_bundled_only(model_id, verify_hash=False):
                 set_status(f"{spec.display_name} 为随包内置模型，不能删除")
             else:
                 set_status(f"{spec.display_name} 没有可删除的用户缓存")

@@ -27,7 +27,7 @@ from typing import Any, Callable, Protocol
 
 try:
     from formula_ocr_app.formula_formats import clean_recognized_latex
-    from formula_ocr_app.image_utils import load_rgb_image
+    from formula_ocr_app.image_utils import foreground_bbox, load_rgb_image
     from formula_ocr_app.model_api import (
         DownloadProgressCallback,
         ModelDownloadError,
@@ -42,7 +42,7 @@ except ModuleNotFoundError as exc:  # Allows ``python formula_ocr_app/app.py``.
     if exc.name != "formula_ocr_app":
         raise
     from formula_formats import clean_recognized_latex
-    from image_utils import load_rgb_image
+    from image_utils import foreground_bbox, load_rgb_image
     from model_api import DownloadProgressCallback, ModelDownloadError
     from model_catalog import DEFAULT_MODEL_ID
     from runtime_paths import (
@@ -532,18 +532,15 @@ def _prepare_unimernet_image(image: Any, input_size: tuple[int, int]) -> Any:
     cropped = image
     if maximum != minimum:
         normalized = (gray.astype(np.float32) - minimum) / (maximum - minimum) * 255
-        coordinates = np.argwhere(normalized < 200)
-        if coordinates.size:
-            top, left = coordinates.min(axis=0)
-            bottom, right = coordinates.max(axis=0)
-            crop_width = int(right - left + 1)
-            crop_height = int(bottom - top + 1)
+        bbox = foreground_bbox(normalized < 200)
+        if bbox is not None:
+            left, top, right, bottom = bbox
+            crop_width = right - left
+            crop_height = bottom - top
             if min(crop_width, crop_height) > 0 and (
                 max(crop_width, crop_height) / min(crop_width, crop_height) <= 200
             ):
-                cropped = image.crop(
-                    (int(left), int(top), int(right) + 1, int(bottom) + 1)
-                )
+                cropped = image.crop(bbox)
 
     target_height, target_width = input_size
     width, height = cropped.size
@@ -596,11 +593,10 @@ def _prepare_latex_ocr_image(
     else:
         mask = data > 128
         data = 255 - data
-    coordinates = np.argwhere(mask)
-    if coordinates.size:
-        top, left = coordinates.min(axis=0)
-        bottom, right = coordinates.max(axis=0)
-        data = data[int(top) : int(bottom) + 1, int(left) : int(right) + 1]
+    bbox = foreground_bbox(mask)
+    if bbox is not None:
+        left, top, right, bottom = bbox
+        data = data[top:bottom, left:right]
 
     cropped = Image.fromarray(np.clip(data, 0, 255).astype(np.uint8), mode="L")
     padded_width = math.ceil(cropped.width / 32) * 32

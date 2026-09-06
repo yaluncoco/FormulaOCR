@@ -160,6 +160,11 @@ def download_verified_file(
         offset = 0
     mode = "ab" if append else "wb"
     oversized = False
+    transfer_errors = (OSError,) + (
+        request_exception
+        if isinstance(request_exception, tuple)
+        else (request_exception,)
+    )
     try:
         notify(completed + offset, total)
         last_report = 0.0
@@ -176,7 +181,7 @@ def download_verified_file(
                 if now - last_report >= 0.5 or offset >= item.size:
                     notify(completed + offset, total)
                     last_report = now
-    except (OSError, request_exception) as exc:
+    except transfer_errors as exc:
         raise VerifiedDownloadFailure(
             "transfer",
             item_name=item.name,
@@ -319,9 +324,12 @@ def _cached_sha256_file(path: Path) -> str:
                 continue
 
         with _HASH_CACHE_LOCK:
-            if cached is not None:
+            # Another validator can evict this entry while the file identity
+            # checks above run outside the lock. Reinsert our validated digest
+            # in that case instead of moving a key that no longer exists.
+            if key in _HASH_CACHE:
                 _HASH_CACHE.move_to_end(key)
-                return cached
+                return digest
             stale_keys = [
                 entry for entry in _HASH_CACHE if entry[0] == normalized_path
             ]

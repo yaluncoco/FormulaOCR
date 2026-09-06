@@ -227,9 +227,10 @@ def _generate_formula_tokens(
     import numpy as np
 
     batch_size = int(encoder_hidden_states.shape[0])
+    generation_limit = max(1, int(max_new_tokens))
     active_indices = np.arange(batch_size, dtype=np.int64)
     active_input_ids = np.full(
-        (batch_size, 1), decoder_start_id, dtype=np.int64
+        (batch_size, generation_limit), decoder_start_id, dtype=np.int64
     )
     active_hidden_states = encoder_hidden_states
     token_ids: list[list[int]] = [[] for _ in range(batch_size)]
@@ -241,11 +242,11 @@ def _generate_formula_tokens(
     input_ids_name = decoder_inputs[0].name
     hidden_states_name = decoder_inputs[1].name
 
-    for _ in range(max(1, int(max_new_tokens))):
+    for step in range(generation_limit):
         logits = decoder_session.run(
             None,
             {
-                input_ids_name: active_input_ids,
+                input_ids_name: active_input_ids[:, : step + 1],
                 hidden_states_name: active_hidden_states,
             },
         )[0]
@@ -275,14 +276,13 @@ def _generate_formula_tokens(
             keep_active_rows.append(active_row)
         if not keep_active_rows:
             break
-        active_input_ids = np.concatenate(
-            [
-                active_input_ids[keep_active_rows],
-                next_tokens[keep_active_rows].reshape(len(keep_active_rows), 1),
-            ],
-            axis=1,
-        )
-        active_hidden_states = active_hidden_states[keep_active_rows]
-        active_indices = active_indices[keep_active_rows]
+        if len(keep_active_rows) != len(active_indices):
+            # Encoder output can be several MiB. It stays constant between
+            # decoding steps, so only copy it when finished batch rows leave.
+            active_input_ids = active_input_ids[keep_active_rows]
+            active_hidden_states = active_hidden_states[keep_active_rows]
+            active_indices = active_indices[keep_active_rows]
+        if step + 1 < generation_limit:
+            active_input_ids[:, step + 1] = next_tokens[keep_active_rows]
 
     return token_ids, token_scores, stopped_for_repetition

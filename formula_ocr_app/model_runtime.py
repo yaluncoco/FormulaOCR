@@ -175,14 +175,14 @@ def is_model_bundled(model_id: str) -> bool:
     return is_external_model_bundled(model_id)
 
 
-def is_model_bundled_only(model_id: str) -> bool:
+def is_model_bundled_only(model_id: str, *, verify_hash: bool = True) -> bool:
     """Return whether the only valid copy available to the app is bundled."""
 
     spec = get_model_spec(model_id)
     if spec.uses_paddle_runtime:
         bundled = is_paddle_model_bundled(model_id)
         if spec.backend == "paddle_hf":
-            bundled = bundled and is_model_cached(model_id, verify_hash=True)
+            bundled = bundled and is_model_cached(model_id, verify_hash=verify_hash)
         return bundled and not paddle_model_has_data(model_id)
     return is_external_model_bundled(model_id) and not external_model_has_data(
         model_id
@@ -223,7 +223,7 @@ def model_status_label(
         # picker. Full SHA-256 validation remains part of model installation
         # and recognition, but it must not block Tk while painting a menu.
         cached = is_model_cached(model_id, verify_hash=False)
-    if cached and is_model_bundled_only(model_id):
+    if cached and is_model_bundled_only(model_id, verify_hash=False):
         return "随包内置"
     if not cached and model_has_user_cache_data(model_id):
         return "下载未完成 · 可继续"

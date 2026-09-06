@@ -1208,7 +1208,7 @@ class FormulaOCRApp(tk.Tk):
             self.model_picker.refresh()
             return
         spec = get_model_spec(model_id)
-        if cached and is_model_bundled_only(model_id):
+        if cached and is_model_bundled_only(model_id, verify_hash=False):
             state = "随包内置"
         else:
             state = "已下载"
@@ -1388,12 +1388,11 @@ class FormulaOCRApp(tk.Tk):
         if not self._ensure_model_terms_accepted(model_id):
             return False
         spec = get_model_spec(model_id)
-        if is_model_cached(model_id):
-            self.status_var.set(f"{spec.display_name} 已下载")
-            return False
+        # ensure_model verifies existing files in the worker before deciding
+        # whether a download is needed. Hashing here blocks Tk on large models.
         self._set_busy(
             True,
-            message=f"正在下载 {spec.display_name}...",
+            message=f"正在检查并准备 {spec.display_name}...",
             show_cancel=True,
         )
         thread = threading.Thread(

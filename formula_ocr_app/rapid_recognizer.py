@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 try:
     from formula_ocr_app.formula_formats import clean_recognized_latex
-    from formula_ocr_app.image_utils import load_rgb_image
+    from formula_ocr_app.image_utils import foreground_bbox, load_rgb_image
     from formula_ocr_app.model_api import DownloadProgressCallback
     from formula_ocr_app.onnx_runtime import (
         create_inference_session,
@@ -17,7 +17,7 @@ except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
     if exc.name != "formula_ocr_app":
         raise
     from formula_formats import clean_recognized_latex
-    from image_utils import load_rgb_image
+    from image_utils import foreground_bbox, load_rgb_image
     from model_api import DownloadProgressCallback
     from onnx_runtime import create_inference_session, repeated_token_suffix_start
     from rapid_model_downloader import ensure_rapid_model
@@ -207,11 +207,10 @@ def _pad_formula(image: Any, divisor: int = 32) -> Any:
     else:
         foreground = data > 128
         data = 255 - data
-    coordinates = np.argwhere(foreground)
-    if coordinates.size:
-        top, left = coordinates.min(axis=0)
-        bottom, right = coordinates.max(axis=0)
-        data = data[int(top) : int(bottom) + 1, int(left) : int(right) + 1]
+    bbox = foreground_bbox(foreground)
+    if bbox is not None:
+        left, top, right, bottom = bbox
+        data = data[top:bottom, left:right]
     height, width = data.shape
     target_width = max(divisor, math.ceil(width / divisor) * divisor)
     target_height = max(divisor, math.ceil(height / divisor) * divisor)
@@ -271,12 +270,16 @@ def _decode_tokens(
             "RapidLaTeXOCR decoder 缺少 token、mask 或 encoder context 输入。"
         )
     token_name, mask_name, context_name = (item.name for item in inputs[:3])
-    output = np.asarray([[bos_token]], dtype=np.int64)
-    mask = np.ones_like(output, dtype=bool)
+    generation_limit = max(1, int(max_new_tokens))
+    output = np.empty((1, generation_limit + 1), dtype=np.int64)
+    output[0, 0] = bos_token
+    mask = np.ones((1, min(512, generation_limit)), dtype=bool)
     generated: list[int] = []
-    for _ in range(max(1, int(max_new_tokens))):
-        recent_tokens = output[:, -512:]
-        recent_mask = mask[:, -512:]
+    for step in range(generation_limit):
+        # The decoder only consumes the last 512 tokens. Reuse token/mask
+        # storage instead of concatenating and padding it at every step.
+        recent_tokens = output[:, max(0, step + 1 - 512) : step + 1]
+        recent_mask = mask[:, : recent_tokens.shape[1]]
         logits = decoder_session.run(
             None,
             {
@@ -286,10 +289,7 @@ def _decode_tokens(
             },
         )[0]
         next_token = int(np.argmax(logits[:, -1, :], axis=-1)[0])
-        output = np.concatenate(
-            [output, np.asarray([[next_token]], dtype=np.int64)], axis=-1
-        )
-        mask = np.pad(mask, ((0, 0), (0, 1)), constant_values=True)
+        output[0, step + 1] = next_token
         generated.append(next_token)
         if next_token == eos_token:
             break
