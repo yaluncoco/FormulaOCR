@@ -143,6 +143,7 @@ try:
         ScrollableFrame,
         SlimScrollbar,
         Toast,
+        UpdateButton,
         WrappingLabel,
         fit_window_to_screen,
         ui_pixels,
@@ -172,6 +173,7 @@ except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
         ScrollableFrame,
         SlimScrollbar,
         Toast,
+        UpdateButton,
         WrappingLabel,
         fit_window_to_screen,
         ui_pixels,
@@ -465,6 +467,7 @@ class FormulaOCRApp(tk.Tk):
         self.model_manager_window: tk.Toplevel | None = None
         self.update_check_thread: threading.Thread | None = None
         self.update_check_after_id: str | None = None
+        self.available_update: ReleaseInfo | None = None
         self._update_fetcher = update_fetcher or fetch_latest_release
         self.capture_after_id: str | None = None
         self.screenshot_selector: ScreenshotSelector | None = None
@@ -633,16 +636,10 @@ class FormulaOCRApp(tk.Tk):
             border=BORDER,
         )
         model_bar.add(self.model_manager_button)
-        self.update_button = RoundedButton(
+        self.update_button = UpdateButton(
             model_bar,
-            text="检查更新",
-            command=self.check_for_updates,
-            width=88,
-            height=38,
-            radius=13,
-            bg="#ffffff",
-            active_bg=ACCENT_SOFT,
-            border=BORDER,
+            command=self.show_update_status,
+            current_version=__version__,
         )
         model_bar.add(self.update_button)
         self.recognize_button = RoundedButton(
@@ -1254,6 +1251,14 @@ class FormulaOCRApp(tk.Tk):
         )
         self.model_picker.refresh()
 
+    def show_update_status(self) -> None:
+        if self.is_destroying:
+            return
+        if self.available_update is not None:
+            self._show_available_update(self.available_update)
+        else:
+            self.check_for_updates()
+
     def check_for_updates(self, *, interactive: bool = True) -> None:
         scheduled_check = self.update_check_after_id
         self.update_check_after_id = None
@@ -1271,7 +1276,7 @@ class FormulaOCRApp(tk.Tk):
             if interactive:
                 self.status_var.set("正在检查更新，请稍候...")
             return
-        self.update_button.set_disabled(True)
+        self.update_button.set_checking(True)
         if interactive:
             self.status_var.set("正在连接 GitHub 检查更新...")
         thread = threading.Thread(
@@ -1309,7 +1314,7 @@ class FormulaOCRApp(tk.Tk):
     def _finish_update_check(self) -> None:
         self.update_check_thread = None
         if not self.is_destroying:
-            self.update_button.set_disabled(False)
+            self.update_button.set_checking(False)
 
     def _handle_update_ready(
         self,
@@ -1318,16 +1323,23 @@ class FormulaOCRApp(tk.Tk):
         interactive: bool,
     ) -> None:
         self._finish_update_check()
-        if not release.update_available:
-            if interactive:
-                messagebox.showinfo(
-                    "检查更新",
-                    f"当前版本 v{__version__} 已是最新正式版。",
-                    parent=self,
-                )
-                self.status_var.set(f"当前已是最新版本 v{__version__}")
+        self.available_update = release if release.update_available else None
+        self.update_button.set_available_version(
+            release.latest_version if self.available_update else None
+        )
+        if not interactive:
             return
+        if not release.update_available:
+            messagebox.showinfo(
+                "检查更新",
+                f"当前版本 v{__version__} 已是最新正式版。",
+                parent=self,
+            )
+            self.status_var.set(f"当前已是最新版本 v{__version__}")
+            return
+        self._show_available_update(release)
 
+    def _show_available_update(self, release: ReleaseInfo) -> None:
         notes = self._release_notes_excerpt(release.notes)
         target = release.installer_url or release.release_url
         action = "下载 Windows 安装包" if release.installer_url else "打开发布页面"
@@ -1350,11 +1362,12 @@ class FormulaOCRApp(tk.Tk):
             )
         else:
             self.status_var.set(
-                f"已发现 v{release.latest_version}，可稍后点击“检查更新”"
+                f"已发现 v{release.latest_version}，可稍后点击更新图标查看"
             )
 
     def _handle_update_error(self, message: str, *, interactive: bool) -> None:
         self._finish_update_check()
+        self.update_button.set_check_failed()
         if not interactive:
             return
         friendly = message or "无法连接 GitHub 检查更新，请稍后重试。"

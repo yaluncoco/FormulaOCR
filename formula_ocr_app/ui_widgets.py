@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import sys
 from dataclasses import dataclass
 import tkinter as tk
@@ -45,6 +46,7 @@ __all__ = [
     "TEXT_PRIMARY",
     "TEXT_SECONDARY",
     "Toast",
+    "UpdateButton",
     "WrappingLabel",
     "fit_window_to_screen",
     "ui_pixels",
@@ -664,20 +666,169 @@ class RoundedButton(tk.Canvas):
             outline=outline,
             width=1,
         )
-        self.create_text(
-            width // 2,
-            height // 2,
-            text=self.text,
-            fill=text_color,
-            font=self._font,
-            tags="caption",
-        )
+        self._draw_content(width, height, text_color)
         if not self.is_disabled and self.focus_get() is self:
             _rounded_rect(
                 self, 3, 3, width - 3, height - 3, max(1, radius - 2),
                 fill="", outline="#ffffff" if fill == ACCENT else ACCENT,
                 width=2, tags="focus",
             )
+
+    def _draw_content(self, width: int, height: int, color: str) -> None:
+        self.create_text(
+            width // 2, height // 2, text=self.text, fill=color,
+            font=self._font, tags=("caption", "content"),
+        )
+
+
+class UpdateButton(RoundedButton):
+    """Compact update action with a persistent badge and a quiet busy state."""
+
+    def __init__(self, parent: tk.Widget, *, command, current_version: str) -> None:
+        self.current_version = current_version
+        self.available_version: str | None = None
+        self.is_checking = False
+        self._checked = False
+        self._failed = False
+        self._angle = 0
+        self._spin_after_id: str | None = None
+        self._tooltip_after_id: str | None = None
+        self.tooltip: tk.Toplevel | None = None
+        super().__init__(
+            parent, text="检查更新", command=command, width=38, height=38,
+            radius=12, bg=PANEL_BG, active_bg=ACCENT_SOFT, fg=TEXT_SECONDARY,
+        )
+        self.bind("<Enter>", self._schedule_tooltip, add="+")
+        self.bind("<FocusIn>", self._schedule_tooltip, add="+")
+        for event in ("<Leave>", "<FocusOut>", "<Unmap>", "<Configure>", "<Escape>"):
+            self.bind(event, self._hide_tooltip, add="+")
+        self.bind("<Destroy>", self._on_destroy, add="+")
+
+    @property
+    def tooltip_text(self) -> str:
+        if self.is_checking:
+            return "正在检查更新…"
+        if self.available_version:
+            return f"发现新版本 v{self.available_version}\n点击查看更新说明"
+        if self._failed:
+            return "暂时无法检查更新\n点击重试"
+        if self._checked:
+            return f"已是最新版本 v{self.current_version}\n点击重新检查"
+        return f"检查更新\n当前版本 v{self.current_version}"
+
+    def _update_requested_size(self) -> None:
+        size = ui_pixels(self, 38)
+        self.configure(width=size, height=size)
+
+    def set_checking(self, checking: bool) -> None:
+        if self._spin_after_id is not None:
+            self.after_cancel(self._spin_after_id)
+            self._spin_after_id = None
+        self.is_checking = checking
+        self._angle = 0
+        self.set_disabled(checking)
+        if checking:
+            self._animate()
+        self._refresh_tooltip()
+
+    def set_available_version(self, version: str | None) -> None:
+        self.available_version = version
+        self._checked = True
+        self._failed = False
+        self._draw()
+        self._refresh_tooltip()
+
+    def set_check_failed(self) -> None:
+        # A temporary network error does not invalidate an already found update.
+        self._failed = True
+        self._draw()
+        self._refresh_tooltip()
+
+    def _animate(self) -> None:
+        self._spin_after_id = None
+        if not self.is_checking:
+            return
+        self._angle = (self._angle - 24) % 360
+        self._draw()
+        self._spin_after_id = self.after(80, self._animate)
+
+    def _draw_content(self, width: int, height: int, color: str) -> None:
+        scale = min(width, height) / 38
+        cx, cy = width / 2, height / 2
+        radius = 8 * scale
+        color = ACCENT if self.is_checking else color
+        for start in (45 + self._angle, 225 + self._angle):
+            self.create_arc(
+                cx - radius, cy - radius, cx + radius, cy + radius,
+                start=start, extent=135, style=tk.ARC, outline=color,
+                width=max(1, 1.8 * scale), tags=("icon", "content"),
+            )
+            radians = math.radians(start)
+            rx, ry = math.cos(radians), -math.sin(radians)
+            tx, ty = math.sin(radians), math.cos(radians)
+            x, y = cx + radius * rx, cy + radius * ry
+            self.create_polygon(
+                x + 2 * scale * tx, y + 2 * scale * ty,
+                x - 3 * scale * tx + 3 * scale * rx, y - 3 * scale * ty + 3 * scale * ry,
+                x - 3 * scale * tx - 3 * scale * rx, y - 3 * scale * ty - 3 * scale * ry,
+                fill=color, outline=color, tags=("icon", "content"),
+            )
+        if self.available_version:
+            x, y, radius = width - 8 * scale, 8 * scale, 3.5 * scale
+            self.create_oval(
+                x - radius, y - radius, x + radius, y + radius,
+                fill="#ef4444", outline=PANEL_BG, width=max(1, 1.5 * scale),
+                tags=("badge", "content"),
+            )
+
+    def _click(self, event: tk.Event) -> None:
+        self._hide_tooltip()
+        super()._click(event)
+
+    def _schedule_tooltip(self, _event: tk.Event | None = None) -> None:
+        self._hide_tooltip()
+        self._tooltip_after_id = self.after(450, self._show_tooltip)
+
+    def _show_tooltip(self) -> None:
+        self._hide_tooltip()
+        if not self.winfo_viewable() or not (self._hover or self.focus_get() is self):
+            return
+        popup = tk.Toplevel(self)
+        self.tooltip = popup
+        popup.withdraw()
+        popup.overrideredirect(True)
+        popup.transient(self.winfo_toplevel())
+        tk.Label(
+            popup, text=self.tooltip_text, bg=TEXT_PRIMARY, fg=PANEL_BG,
+            font=("Microsoft YaHei UI", 9), justify=tk.CENTER,
+            padx=ui_pixels(self, 10), pady=ui_pixels(self, 7),
+            wraplength=ui_pixels(self, 260),
+        ).pack()
+        popup.update_idletasks()
+        _show_anchored_popup(
+            popup, self, popup.winfo_reqwidth(), popup.winfo_reqheight(),
+            gap=ui_pixels(self, 6), align="right",
+        )
+        self._tooltip_after_id = self.after(5000, self._hide_tooltip)
+
+    def _refresh_tooltip(self) -> None:
+        if self.tooltip is not None:
+            self._show_tooltip()
+
+    def _hide_tooltip(self, _event: tk.Event | None = None) -> None:
+        if self._tooltip_after_id is not None:
+            self.after_cancel(self._tooltip_after_id)
+            self._tooltip_after_id = None
+        if self.tooltip is not None:
+            self.tooltip.destroy()
+            self.tooltip = None
+
+    def _on_destroy(self, event: tk.Event) -> None:
+        if event.widget is self:
+            if self._spin_after_id is not None:
+                self.after_cancel(self._spin_after_id)
+                self._spin_after_id = None
+            self._hide_tooltip()
 
 
 class RoundedChoice(tk.Frame):

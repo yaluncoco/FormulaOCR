@@ -28,10 +28,23 @@ def descendants(widget: tk.Misc):
         yield from descendants(child)
 
 
+def update_release(version: str = "99.0.0"):
+    return app_module.ReleaseInfo(
+        current_version=app_module.__version__, latest_version=version,
+        tag_name=f"v{version}", release_name=f"FormulaOCR {version}",
+        release_url=f"https://github.com/yaluncoco/FormulaOCR/releases/tag/v{version}",
+        installer_url=f"https://github.com/yaluncoco/FormulaOCR/releases/download/v{version}/FormulaOCRSetup-{version}.exe",
+        notes="改进更新提醒与界面交互。", published_at="2026-09-12T00:00:00Z",
+    )
+
+
 @unittest.skipUnless(sys.platform == "win32" or os.environ.get("DISPLAY"), "requires a desktop Tk display")
 class DesktopInteractionTests(unittest.TestCase):
     @contextmanager
-    def window(self, scale: float = 1.5, screen: tuple[int, int] | None = None):
+    def window(
+        self, scale: float = 1.5, screen: tuple[int, int] | None = None,
+        *, auto_check_updates: bool = False, update_fetcher=None,
+    ):
         app_module.enable_windows_dpi_awareness()
         callbacks = []
 
@@ -53,7 +66,7 @@ class DesktopInteractionTests(unittest.TestCase):
             mock.patch.object(app_module.messagebox, "showerror") as errors,
             mock.patch.object(ui_widgets, "_monitor_work_area", return_value=ui_widgets._ScreenArea(0, 0, *screen)) if screen else nullcontext(),
         ):
-            app = ScaledApp(auto_check_updates=False)
+            app = ScaledApp(auto_check_updates=auto_check_updates, update_fetcher=update_fetcher)
             try:
                 app.update()
                 yield app, errors
@@ -73,7 +86,7 @@ class DesktopInteractionTests(unittest.TestCase):
                         ancestor.see(button)
                     ancestor = ancestor.master
                 window.update()
-                box = button.bbox("caption")
+                box = button.bbox("content")
                 self.assertIsNotNone(box)
                 self.assertGreaterEqual(box[0], 2)
                 self.assertGreaterEqual(box[1], 2)
@@ -109,6 +122,7 @@ class DesktopInteractionTests(unittest.TestCase):
     def test_main_window_at_five_scales_and_narrow_widths(self):
         for scale in (1.0, 1.25, 1.5, 1.75, 2.0):
             with self.subTest(scale=scale), self.window(scale) as (app, _errors):
+                app.update_button.set_available_version("99.0.0")
                 large = f"{app.winfo_width()}x{app.winfo_height()}"
                 self.assert_window_on_screen(app)
                 self.assert_buttons_fit(app)
@@ -118,6 +132,115 @@ class DesktopInteractionTests(unittest.TestCase):
                 self.assertGreater(app.output_text.winfo_height(), ui_pixels(app, 45))
                 app.geometry(large)
                 self.assert_buttons_fit(app)
+
+    def test_startup_update_badge_is_quiet_and_click_reuses_release_details(self):
+        release = update_release()
+        fetch = mock.Mock(return_value=release)
+        with (
+            self.window(auto_check_updates=True, update_fetcher=fetch) as (app, errors),
+            mock.patch.object(app_module.messagebox, "askyesno", return_value=False) as prompt,
+            mock.patch.object(app_module.messagebox, "showinfo") as info,
+            mock.patch.object(app_module.messagebox, "showwarning") as warning,
+            mock.patch.object(app, "_open_update_url") as open_url,
+        ):
+            app.focus_force()
+            app.update()
+            app.focus_latex_editor()
+            app.status_var.set("正在编辑公式")
+            self.pump(app, 2500)
+            fetch.assert_called_once_with(app_module.__version__)
+            self.assertTrue(app.update_button.find_withtag("badge"))
+            self.assertEqual(app.status_var.get(), "正在编辑公式")
+            self.assertIs(app.focus_get(), app.output_text)
+            prompt.assert_not_called()
+            info.assert_not_called()
+            warning.assert_not_called()
+            open_url.assert_not_called()
+            app.update_button.event_generate("<Button-1>")
+            prompt.assert_called_once()
+            self.assertIn(release.latest_version, prompt.call_args.args[1])
+            self.assertIn(release.notes, prompt.call_args.args[1])
+            self.assertTrue(app.update_button.find_withtag("badge"))
+            open_url.assert_not_called()
+            prompt.return_value = True
+            app.update_button.event_generate("<Button-1>")
+            open_url.assert_called_once_with(release.installer_url)
+            fetch.assert_called_once()
+            self.assertTrue(app.update_button.find_withtag("badge"))
+            errors.assert_not_called()
+
+    def test_update_badge_survives_offline_check_and_retry_can_clear_it(self):
+        with (
+            self.window() as (app, errors),
+            mock.patch.object(app_module.messagebox, "showwarning") as warning,
+            mock.patch.object(app_module.messagebox, "showinfo") as info,
+        ):
+            release = update_release()
+            app._handle_update_ready(release, interactive=False)
+            app._update_fetcher = mock.Mock(side_effect=app_module.UpdateCheckError("offline"))
+            app.check_for_updates(interactive=False)
+            app.update_check_thread.join(timeout=2)
+            app._poll_worker_queue()
+            self.assertIs(app.available_update, release)
+            self.assertTrue(app.update_button.find_withtag("badge"))
+            self.assertFalse(app.update_button.is_checking)
+            self.assertFalse(app.update_button.is_disabled)
+            warning.assert_not_called()
+            app._handle_update_ready(update_release(app_module.__version__), interactive=False)
+            self.assertIsNone(app.available_update)
+            self.assertFalse(app.update_button.find_withtag("badge"))
+            self.assertIn("已是最新版本", app.update_button.tooltip_text)
+            app._handle_update_error("offline", interactive=False)
+            self.assertIn("点击重试", app.update_button.tooltip_text)
+            app._update_fetcher = mock.Mock(return_value=update_release(app_module.__version__))
+            app.update_button.event_generate("<Button-1>")
+            app.update_check_thread.join(timeout=2)
+            app._poll_worker_queue()
+            info.assert_called_once()
+            self.assertIn("已是最新版本", app.update_button.tooltip_text)
+            self.assertFalse(app.update_button.find_withtag("badge"))
+            errors.assert_not_called()
+
+    def test_update_icon_tooltip_preserves_focus_and_keyboard_click_works(self):
+        for scale in (1.0, 2.0):
+            with self.subTest(scale=scale), self.window(scale) as (app, _errors):
+                button = app.update_button
+                button.set_available_version("99.0.0")
+                self.assertEqual(button.winfo_reqwidth(), button.winfo_reqheight())
+                app.focus_force()
+                app.update()
+                app.focus_latex_editor()
+                button.event_generate("<Enter>")
+                self.pump(app, 550)
+                self.assertIsNotNone(button.tooltip)
+                self.assert_window_on_screen(button.tooltip)
+                self.assertIs(app.focus_get(), app.output_text)
+                self.assertIn("99.0.0", button.tooltip_text)
+                button.event_generate("<Leave>")
+                self.assertIsNone(button.tooltip)
+                button.focus_set()
+                self.pump(app, 550)
+                self.assertIsNotNone(button.tooltip)
+                self.assertIs(app.focus_get(), button)
+                with mock.patch.object(button, "command") as activate:
+                    button.event_generate("<Return>")
+                    activate.assert_called_once()
+                    self.assertIsNone(button.tooltip)
+
+    def test_closing_during_update_cancels_animation_and_tooltip(self):
+        with self.window() as (app, _errors):
+            button = app.update_button
+            button.event_generate("<Enter>")
+            button.set_checking(True)
+            self.pump(app, 100)
+            spin_timer = button._spin_after_id
+            tooltip_timer = button._tooltip_after_id
+            self.assertIsNotNone(spin_timer)
+            self.assertIsNotNone(tooltip_timer)
+            app.destroy()
+            remaining = app.tk.call("after", "info")
+            self.assertNotIn(spin_timer, remaining)
+            self.assertNotIn(tooltip_timer, remaining)
 
     def test_small_screen_keeps_controls_reachable_at_large_scale(self):
         for screen, scale in (((1024, 728), 2.0), ((1366, 728), 1.5)):
