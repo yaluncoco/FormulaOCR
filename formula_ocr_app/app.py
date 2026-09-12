@@ -55,6 +55,7 @@ try:
         model_status_label,
         model_user_cache_path,
     )
+    from formula_ocr_app.numeric_intervals import numeric_interval_needs_retry
     from formula_ocr_app.recognition_pipeline import FormulaRecognizer
     from formula_ocr_app.runtime_paths import (
         runtime_cache_dir,
@@ -104,6 +105,7 @@ except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
         model_status_label,
         model_user_cache_path,
     )
+    from numeric_intervals import numeric_interval_needs_retry
     from recognition_pipeline import FormulaRecognizer
     from runtime_paths import (
         runtime_cache_dir,
@@ -131,12 +133,18 @@ try:
         SURFACE_SUBTLE,
         TEXT_PRIMARY,
         TEXT_SECONDARY,
+        FlowFrame,
         ModelFilterChips,
         ModelPicker,
         RoundedButton,
         RoundedChoice,
         RoundedPanel,
+        ResponsiveRow,
         SlimScrollbar,
+        Toast,
+        WrappingLabel,
+        fit_window_to_screen,
+        ui_pixels,
         _anchored_popup_geometry,
         _ScreenArea,
     )
@@ -153,12 +161,18 @@ except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
         SURFACE_SUBTLE,
         TEXT_PRIMARY,
         TEXT_SECONDARY,
+        FlowFrame,
         ModelFilterChips,
         ModelPicker,
         RoundedButton,
         RoundedChoice,
         RoundedPanel,
+        ResponsiveRow,
         SlimScrollbar,
+        Toast,
+        WrappingLabel,
+        fit_window_to_screen,
+        ui_pixels,
         _anchored_popup_geometry,
         _ScreenArea,
     )
@@ -405,8 +419,6 @@ class FormulaOCRApp(tk.Tk):
     ) -> None:
         super().__init__()
         self.title("公式识别助手")
-        self.geometry("1240x780")
-        self.minsize(1040, 650)
         self.configure(bg=APP_BG)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
@@ -434,6 +446,7 @@ class FormulaOCRApp(tk.Tk):
         self.worker_poll_after_id: str | None = None
         self.mathml_preview_poll_after_id: str | None = None
         self.mathml_render_token = 0
+        self.manual_preview_token: int | None = None
         self.mathml_render_lock = threading.Lock()
         self.mathml_pending_render: tuple[int, str, str] | None = None
         self.mathml_render_thread: threading.Thread | None = None
@@ -455,6 +468,7 @@ class FormulaOCRApp(tk.Tk):
         self.screenshot_selector: ScreenshotSelector | None = None
 
         self._configure_styles()
+        fit_window_to_screen(self, (1240, 780), (800, 640))
         self._set_window_icon()
         self._build_ui()
         self._bind_shortcuts()
@@ -506,7 +520,7 @@ class FormulaOCRApp(tk.Tk):
             background=PANEL_BG,
             fieldbackground=PANEL_BG,
             foreground=TEXT_PRIMARY,
-            rowheight=40,
+            rowheight=ui_pixels(self, 40),
             borderwidth=0,
             font=("Microsoft YaHei UI", 9),
         )
@@ -561,11 +575,12 @@ class FormulaOCRApp(tk.Tk):
 
         header = tk.Frame(self, bg=APP_BG)
         header.grid(row=0, column=0, sticky="ew")
-        header.columnconfigure(1, weight=1)
+        header.columnconfigure(0, weight=1)
         header.configure(padx=22, pady=18)
 
-        title_group = tk.Frame(header, bg=APP_BG)
-        title_group.grid(row=0, column=0, sticky="w")
+        header_row = ResponsiveRow(header, bg=APP_BG, gap=20)
+        header_row.grid(row=0, column=0, sticky="ew")
+        title_group = tk.Frame(header_row, bg=APP_BG)
         tk.Label(
             title_group,
             text="公式识别助手",
@@ -583,8 +598,7 @@ class FormulaOCRApp(tk.Tk):
             font=("Microsoft YaHei UI", 10),
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
-        model_bar = tk.Frame(header, bg=APP_BG)
-        model_bar.grid(row=0, column=1, sticky="e")
+        model_bar = FlowFrame(header_row, bg=APP_BG, align="right")
         selected_model = (
             self.saved_settings.model_id
             if self.saved_settings.model_id in MODEL_BY_ID
@@ -599,7 +613,7 @@ class FormulaOCRApp(tk.Tk):
             status_provider=model_status_label,
             manager_command=self.show_model_manager,
         )
-        self.model_picker.pack(side=tk.LEFT)
+        model_bar.add(self.model_picker)
         self.model_manager_button = RoundedButton(
             model_bar,
             text="模型管理",
@@ -611,7 +625,7 @@ class FormulaOCRApp(tk.Tk):
             active_bg=ACCENT_SOFT,
             border=BORDER,
         )
-        self.model_manager_button.pack(side=tk.LEFT, padx=(8, 0))
+        model_bar.add(self.model_manager_button)
         self.update_button = RoundedButton(
             model_bar,
             text="检查更新",
@@ -623,7 +637,7 @@ class FormulaOCRApp(tk.Tk):
             active_bg=ACCENT_SOFT,
             border=BORDER,
         )
-        self.update_button.pack(side=tk.LEFT, padx=(8, 0))
+        model_bar.add(self.update_button)
         self.recognize_button = RoundedButton(
             model_bar,
             text="识别",
@@ -637,23 +651,25 @@ class FormulaOCRApp(tk.Tk):
             border=ACCENT,
             font=("Microsoft YaHei UI", 10, "bold"),
         )
-        self.recognize_button.pack(side=tk.LEFT, padx=(10, 0))
+        model_bar.add(self.recognize_button)
+        header_row.set_widgets(title_group, model_bar)
 
         self.model_info_var = tk.StringVar()
-        tk.Label(
+        WrappingLabel(
             header,
             textvariable=self.model_info_var,
             bg=APP_BG,
             fg=TEXT_SECONDARY,
             anchor=tk.E,
+            justify=tk.RIGHT,
             font=("Microsoft YaHei UI", 9),
-        ).grid(row=1, column=1, sticky="e", pady=(7, 0))
+        ).grid(row=1, column=0, sticky="ew", pady=(7, 0))
         self._update_model_summary()
 
         content = tk.Frame(self, bg=APP_BG)
         content.grid(row=1, column=0, sticky="nsew", padx=22, pady=(0, 14))
-        content.columnconfigure(0, weight=3)
-        content.columnconfigure(1, weight=2)
+        content.columnconfigure(0, weight=1, uniform="panels")
+        content.columnconfigure(1, weight=1, uniform="panels")
         content.rowconfigure(0, weight=1)
 
         left_panel = RoundedPanel(content, radius=22, padding=18)
@@ -688,32 +704,26 @@ class FormulaOCRApp(tk.Tk):
             font=("Microsoft YaHei UI", 9),
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
-        image_toolbar = tk.Frame(left, bg=PANEL_BG)
+        image_toolbar = FlowFrame(left, bg=PANEL_BG)
         image_toolbar.grid(row=1, column=0, sticky="ew", pady=(12, 12))
-        RoundedButton(
+        image_toolbar.add(RoundedButton(
             image_toolbar,
             text="打开图片",
             command=self.open_image,
             width=112,
-        ).pack(
-            side=tk.LEFT
-        )
-        RoundedButton(
+        ))
+        image_toolbar.add(RoundedButton(
             image_toolbar,
             text="粘贴图片",
             command=self.paste_image,
             width=112,
-        ).pack(
-            side=tk.LEFT, padx=(8, 0)
-        )
-        RoundedButton(
+        ))
+        image_toolbar.add(RoundedButton(
             image_toolbar,
             text="截图",
             command=self.capture_screen,
             width=84,
-        ).pack(
-            side=tk.LEFT, padx=(8, 0)
-        )
+        ))
 
         preview_frame = tk.Frame(
             left,
@@ -739,40 +749,34 @@ class FormulaOCRApp(tk.Tk):
             add="+",
         )
 
-        output_header = tk.Frame(right, bg=PANEL_BG)
+        output_header = ResponsiveRow(right, bg=PANEL_BG)
         output_header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        output_header.columnconfigure(0, weight=1)
-        tk.Label(
+        output_title = tk.Label(
             output_header,
             text="识别结果",
             bg=PANEL_BG,
             fg=TEXT_PRIMARY,
             font=("Microsoft YaHei UI", 12, "bold"),
-        ).grid(
-            row=0, column=0, sticky="w"
         )
-        output_actions = tk.Frame(output_header, bg=PANEL_BG)
-        output_actions.grid(row=0, column=1, sticky="e")
-        RoundedButton(
+        output_actions = FlowFrame(output_header, bg=PANEL_BG, align="right")
+        self.copy_latex_button = RoundedButton(
             output_actions,
-            text="复制LaTeX",
+            text="复制 LaTeX",
             command=self.copy_latex,
             width=104,
             height=34,
             radius=12,
-        ).pack(
-            side=tk.LEFT
         )
-        RoundedButton(
+        output_actions.add(self.copy_latex_button)
+        self.copy_mathml_button = RoundedButton(
             output_actions,
-            text="复制MathML",
+            text="复制 MathML",
             command=self.copy_mathml,
             width=104,
             height=34,
             radius=12,
-        ).pack(
-            side=tk.LEFT, padx=(8, 0)
         )
+        output_actions.add(self.copy_mathml_button)
         self.format_menu = tk.Menu(
             self,
             tearoff=0,
@@ -838,17 +842,17 @@ class FormulaOCRApp(tk.Tk):
             fg=ACCENT_DARK,
             border="#f6bfd9",
         )
-        self.format_button.pack(side=tk.LEFT, padx=(8, 0))
-        RoundedButton(
+        output_actions.add(self.format_button)
+        self.clear_button = RoundedButton(
             output_actions,
             text="清空",
             command=self.clear_output,
             width=72,
             height=34,
             radius=12,
-        ).pack(
-            side=tk.LEFT, padx=(8, 0)
         )
+        output_actions.add(self.clear_button)
+        output_header.set_widgets(output_title, output_actions)
 
         results_frame = tk.Frame(right, bg=PANEL_BG)
         results_frame.grid(row=1, column=0, sticky="nsew")
@@ -860,25 +864,25 @@ class FormulaOCRApp(tk.Tk):
         latex_section.grid(row=0, column=0, sticky="nsew", pady=(0, 12))
         latex_section.rowconfigure(1, weight=1)
         latex_section.columnconfigure(0, weight=1)
-        latex_header = tk.Frame(latex_section, bg=PANEL_BG)
+        latex_header = ResponsiveRow(latex_section, bg=PANEL_BG)
         latex_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        latex_header.columnconfigure(0, weight=1)
-        tk.Label(
+        latex_title = tk.Label(
             latex_header,
             text="LaTeX 结果",
             bg=PANEL_BG,
             fg=TEXT_PRIMARY,
             font=("Microsoft YaHei UI", 10, "bold"),
-        ).grid(row=0, column=0, sticky="w")
-        tk.Label(
-            latex_header,
+        )
+        latex_actions = FlowFrame(latex_header, bg=PANEL_BG, align="right")
+        latex_actions.add(tk.Label(
+            latex_actions,
             text="点击文本可直接修改",
             bg=PANEL_BG,
             fg=TEXT_SECONDARY,
             font=("Microsoft YaHei UI", 9),
-        ).grid(row=0, column=1, sticky="e", padx=(8, 8))
+        ))
         self.latex_edit_button = RoundedButton(
-            latex_header,
+            latex_actions,
             text="编辑 LaTeX",
             command=self.focus_latex_editor,
             width=94,
@@ -888,7 +892,8 @@ class FormulaOCRApp(tk.Tk):
             active_bg=ACCENT_SOFT,
             border=BORDER,
         )
-        self.latex_edit_button.grid(row=0, column=2, sticky="e")
+        latex_actions.add(self.latex_edit_button)
+        latex_header.set_widgets(latex_title, latex_actions)
 
         latex_frame = tk.Frame(
             latex_section,
@@ -908,6 +913,7 @@ class FormulaOCRApp(tk.Tk):
             autoseparators=True,
             maxundo=-1,
             height=1,
+            width=1,
             state=tk.NORMAL,
             takefocus=True,
             cursor="xterm",
@@ -940,7 +946,7 @@ class FormulaOCRApp(tk.Tk):
         )
         self.latex_edit_menu.add_command(
             label="复制",
-            command=lambda: self.output_text.event_generate("<<Copy>>"),
+            command=self._copy_latex_selection,
         )
         self.latex_edit_menu.add_command(
             label="粘贴",
@@ -957,6 +963,7 @@ class FormulaOCRApp(tk.Tk):
         self.output_text.bind("<Control-z>", self._latex_undo, add="+")
         self.output_text.bind("<Control-y>", self._latex_redo, add="+")
         self.output_text.bind("<Control-Shift-Z>", self._latex_redo, add="+")
+        self.output_text.bind("<<Copy>>", self._copy_latex_selection)
         self.latex_scrollbar = SlimScrollbar(
             latex_frame, command=self.output_text.yview
         )
@@ -967,24 +974,24 @@ class FormulaOCRApp(tk.Tk):
         mathml_section.grid(row=1, column=0, sticky="nsew")
         mathml_section.rowconfigure(1, weight=1)
         mathml_section.columnconfigure(0, weight=1)
-        mathml_header = tk.Frame(mathml_section, bg=PANEL_BG)
+        mathml_header = ResponsiveRow(mathml_section, bg=PANEL_BG)
         mathml_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        mathml_header.columnconfigure(0, weight=1)
-        tk.Label(
+        mathml_title = tk.Label(
             mathml_header,
             text="MathML 公式展示",
             bg=PANEL_BG,
             fg=TEXT_PRIMARY,
             font=("Microsoft YaHei UI", 10, "bold"),
-        ).grid(row=0, column=0, sticky="w")
-        RoundedButton(
+        )
+        self.refresh_preview_button = RoundedButton(
             mathml_header,
             text="刷新预览",
             command=self.refresh_mathml_preview,
             width=92,
             height=30,
             radius=11,
-        ).grid(row=0, column=1, sticky="e", padx=(8, 0))
+        )
+        mathml_header.set_widgets(mathml_title, self.refresh_preview_button)
 
         mathml_frame = tk.Frame(
             mathml_section,
@@ -1019,7 +1026,7 @@ class FormulaOCRApp(tk.Tk):
         status_frame.columnconfigure(0, weight=1)
 
         self.status_var = tk.StringVar(value="就绪")
-        status_label = tk.Label(
+        status_label = WrappingLabel(
             status_frame,
             textvariable=self.status_var,
             anchor=tk.W,
@@ -1051,6 +1058,7 @@ class FormulaOCRApp(tk.Tk):
         self.cancel_download_button.grid_remove()
         self.busy_progress.grid(row=0, column=2, sticky="e", padx=(12, 0))
         self.busy_progress.grid_remove()
+        self.feedback_toast = Toast(self)
 
     def _bind_shortcuts(self) -> None:
         self.bind("<Control-o>", lambda _event: self.open_image())
@@ -1707,19 +1715,36 @@ class FormulaOCRApp(tk.Tk):
     def copy_latex(self) -> None:
         latex = self._current_latex()
         if not latex:
-            self.status_var.set("没有可复制的 LaTeX")
+            self._show_feedback("没有可复制的 LaTeX", anchor=self.copy_latex_button, warning=True)
             return
+        self._copy_plain_text(latex, "LaTeX", self.copy_latex_button)
+
+    def _show_feedback(self, message: str, *, anchor: tk.Widget, warning: bool = False) -> None:
+        self.status_var.set(message)
+        self.feedback_toast.show(message, anchor=anchor, warning=warning)
+
+    def _copy_plain_text(self, value: str, label: str, anchor: tk.Widget) -> None:
+        self.feedback_toast.hide()
         try:
-            self._copy_text(latex)
+            self._copy_text(value)
         except tk.TclError as exc:
-            write_log(f"Failed to copy LaTeX: {exc}")
+            write_log(f"Failed to copy {label}: {exc}")
             messagebox.showerror("复制失败", "剪贴板暂时不可用，请稍后重试。", parent=self)
             self.status_var.set("复制失败")
             return
-        self.status_var.set("LaTeX 已复制到剪贴板")
+        self._show_feedback(f"{label} 已复制到剪贴板", anchor=anchor)
+
+    def _copy_latex_selection(self, _event: tk.Event | None = None) -> str:
+        try:
+            value = self.output_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+        except tk.TclError:
+            self._show_feedback("请先选中要复制的文本", anchor=self.copy_latex_button, warning=True)
+        else:
+            self._copy_plain_text(value, "选中文本", self.copy_latex_button)
+        return "break"
 
     def copy_mathml(self) -> None:
-        self.copy_format("mathml")
+        self.copy_format("mathml", anchor=self.copy_mathml_button)
 
     def show_format_menu(self) -> None:
         self.update_idletasks()
@@ -1735,10 +1760,12 @@ class FormulaOCRApp(tk.Tk):
         finally:
             self.format_menu.grab_release()
 
-    def copy_format(self, fmt: str) -> None:
+    def copy_format(self, fmt: str, *, anchor: tk.Widget | None = None) -> None:
+        anchor = anchor or self.format_button
+        self.feedback_toast.hide()
         latex = self._current_latex()
         if not latex:
-            self.status_var.set("没有可转换的 LaTeX")
+            self._show_feedback("没有可转换的 LaTeX", anchor=anchor, warning=True)
             return
         try:
             if fmt == "mathml":
@@ -1747,9 +1774,9 @@ class FormulaOCRApp(tk.Tk):
                 label = "MathML(Word)"
                 rich_copied = self._copy_mathml_for_word(mathml, plain_text=value)
                 if rich_copied:
-                    self.status_var.set(f"{label} 已复制到剪贴板")
+                    self._show_feedback(f"{label} 已复制到剪贴板", anchor=anchor)
                 else:
-                    self.status_var.set(f"{label} 富格式复制失败，已复制纯文本")
+                    self._show_feedback(f"{label} 富格式复制失败，已复制纯文本", anchor=anchor, warning=True)
                 return
             elif fmt == "asciimath":
                 value = latex_to_asciimath(latex)
@@ -1783,22 +1810,15 @@ class FormulaOCRApp(tk.Tk):
             self.status_var.set("复制失败")
             return
         except Exception as exc:
-            messagebox.showerror("转换失败", str(exc))
+            messagebox.showerror("转换失败", str(exc), parent=self)
             self.status_var.set("转换失败")
             return
-        try:
-            self._copy_text(value)
-        except tk.TclError as exc:
-            write_log(f"Failed to copy {label}: {exc}")
-            messagebox.showerror("复制失败", "剪贴板暂时不可用，请稍后重试。", parent=self)
-            self.status_var.set("复制失败")
-            return
-        self.status_var.set(f"{label} 已复制到剪贴板")
+        self._copy_plain_text(value, label, anchor)
 
     def export_docx(self) -> None:
         latex = self._current_latex()
         if not latex:
-            self.status_var.set("没有可导出的 LaTeX")
+            self._show_feedback("没有可导出的 LaTeX", anchor=self.format_button, warning=True)
             return
         file_path = filedialog.asksaveasfilename(
             title="导出 Docx",
@@ -1823,9 +1843,10 @@ class FormulaOCRApp(tk.Tk):
                 image_path=self.current_image_path,
             )
         except Exception as exc:
-            messagebox.showerror("导出失败", str(exc))
+            messagebox.showerror("导出失败", str(exc), parent=self)
             self.status_var.set("导出失败")
             return
+        self._show_feedback("Docx 已导出", anchor=self.format_button)
         self.status_var.set(f"Docx 已导出：{file_path}")
 
     def _current_latex(self) -> str:
@@ -1852,8 +1873,14 @@ class FormulaOCRApp(tk.Tk):
         if self.mathml_update_after_id is not None:
             self.after_cancel(self.mathml_update_after_id)
             self.mathml_update_after_id = None
-        self._update_mathml_preview()
-        self.status_var.set("正在刷新 MathML 预览")
+        if not self._current_latex():
+            self._update_mathml_preview()
+            self._show_feedback("暂无可预览的公式", anchor=self.refresh_preview_button, warning=True)
+        elif self._update_mathml_preview():
+            self.manual_preview_token = self.mathml_render_token
+            self.status_var.set("正在刷新 MathML 预览")
+        else:
+            self._show_feedback("预览转换失败，请检查 LaTeX", anchor=self.refresh_preview_button, warning=True)
 
     def _on_latex_modified(self, _event: tk.Event) -> None:
         if not self.output_text.edit_modified():
@@ -1868,24 +1895,33 @@ class FormulaOCRApp(tk.Tk):
             self.after_cancel(self.mathml_update_after_id)
         self.mathml_update_after_id = self.after(450, self._update_mathml_preview)
 
-    def _update_mathml_preview(self) -> None:
+    def _update_mathml_preview(self) -> bool:
         self.mathml_update_after_id = None
+        manual_refresh_pending = self.manual_preview_token is not None
+        self.manual_preview_token = None
         self.mathml_render_token += 1
         token = self.mathml_render_token
         latex = self._current_latex()
         if not latex:
             self._cancel_pending_mathml_render()
             self._set_mathml_preview_text("暂无公式预览")
-            return
+            if manual_refresh_pending and self.status_var.get() == "正在刷新 MathML 预览":
+                self.status_var.set("暂无可预览的公式")
+            return False
         try:
             mathml = latex_to_mathml(latex)
         except Exception as exc:
             self._cancel_pending_mathml_render()
             write_log(f"Failed to convert LaTeX to MathML: {exc}")
             self._set_mathml_preview_text("MathML 转换失败")
-            return
+            if manual_refresh_pending and self.status_var.get() == "正在刷新 MathML 预览":
+                self.status_var.set("预览转换失败，请检查 LaTeX")
+            return False
         self._set_mathml_preview_text("正在渲染 MathML...")
+        if manual_refresh_pending:
+            self.manual_preview_token = token
         self._queue_mathml_render(token, latex, mathml)
+        return True
 
     def _set_mathml_preview_text(self, text: str) -> None:
         self.mathml_preview_source = None
@@ -1907,6 +1943,8 @@ class FormulaOCRApp(tk.Tk):
         self.output_text.edit_modified(False)
 
     def clear_output(self, *, update_status: bool = True) -> None:
+        self.feedback_toast.hide()
+        self.manual_preview_token = None
         if self.mathml_update_after_id is not None:
             self.after_cancel(self.mathml_update_after_id)
             self.mathml_update_after_id = None
@@ -1915,7 +1953,7 @@ class FormulaOCRApp(tk.Tk):
         self._cancel_pending_mathml_render()
         self._set_mathml_preview_text("暂无公式预览")
         if update_status:
-            self.status_var.set("结果已清空")
+            self._show_feedback("结果已清空", anchor=self.clear_button)
 
     def _recognize_worker(
         self,
@@ -2096,7 +2134,15 @@ class FormulaOCRApp(tk.Tk):
             elapsed = float(payload.get("elapsed", 0.0))
             self._replace_output_text(formula)
             self._update_mathml_preview()
-            self.status_var.set(f"识别完成，用时 {elapsed:.2f} 秒；结果已保留")
+            if numeric_interval_needs_retry(formula):
+                self._show_feedback(
+                    "区间识别可能不完整，请核对或切换模型重试",
+                    anchor=self.recognize_button,
+                    warning=True,
+                )
+            else:
+                self.feedback_toast.hide()
+                self.status_var.set(f"识别完成，用时 {elapsed:.2f} 秒；结果已保留")
         elif kind == "recognition_error":
             messagebox.showerror(
                 "识别失败",
@@ -2140,6 +2186,14 @@ class FormulaOCRApp(tk.Tk):
                 else:
                     self._set_mathml_preview_text("MathML 预览不可用")
                     write_log(f"MathML preview render failed: {payload}")
+                if token == self.manual_preview_token:
+                    self.manual_preview_token = None
+                    if self.status_var.get() == "正在刷新 MathML 预览":
+                        success = kind == "image" and self.mathml_preview_source is not None
+                        self._show_feedback(
+                            "预览已刷新" if success else "公式预览不可用，请检查预览区提示",
+                            anchor=self.refresh_preview_button, warning=not success,
+                        )
         except queue.Empty:
             pass
         self._schedule_mathml_preview_poll()
@@ -2991,6 +3045,10 @@ def run_ui_self_test() -> None:
             app.worker_poll_after_id = None
 
         app.deiconify()
+        app.update()
+        # A process started by PowerShell/CI may remain behind another window.
+        # Activate the test window before checking the editor's focus transfer.
+        app.focus_force()
         app.update()
         app._replace_output_text("x")
         app.focus_latex_editor()

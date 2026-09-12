@@ -33,6 +33,10 @@ try:
         ModelDownloadError,
     )
     from formula_ocr_app.model_catalog import DEFAULT_MODEL_ID
+    from formula_ocr_app.numeric_intervals import (
+        numeric_interval_needs_retry,
+        recover_numeric_interval,
+    )
     from formula_ocr_app.runtime_paths import (
         is_paddle_model_cached,
         paddle_runtime_cache_dir,
@@ -45,6 +49,7 @@ except ModuleNotFoundError as exc:  # Allows ``python formula_ocr_app/app.py``.
     from image_utils import foreground_bbox, load_rgb_image
     from model_api import DownloadProgressCallback, ModelDownloadError
     from model_catalog import DEFAULT_MODEL_ID
+    from numeric_intervals import numeric_interval_needs_retry, recover_numeric_interval
     from runtime_paths import (
         is_paddle_model_cached,
         paddle_runtime_cache_dir,
@@ -110,11 +115,32 @@ class PaddleFormulaRecognizer:
 
     def predict(self, image_path: str | Path) -> str:
         self._ensure_model()
-        assert self._predictor is not None
         assert self._preprocess_spec is not None
-        assert self._decoder is not None
 
         tensor = _preprocess_image(Path(image_path).resolve(), self._preprocess_spec)
+        formula = self._predict_tensor(tensor)
+        if (
+            self._preprocess_spec.family == "unimernet"
+            and numeric_interval_needs_retry(formula)
+        ):
+            # Only a recognizably incomplete numeric interval may retry. The
+            # existing predictor reads two endpoint crops; no model switch,
+            # download, recursive retry or changes to ordinary preprocessing.
+            try:
+                formula = recover_numeric_interval(
+                    load_rgb_image(image_path),
+                    formula,
+                    lambda image: self._predict_tensor(
+                        _preprocess_rgb_image(image, self._preprocess_spec)
+                    ),
+                )
+            except (PaddleOCRNotReadyError, OSError):
+                pass  # An optional retry must not discard the original result.
+        return formula
+
+    def _predict_tensor(self, tensor: Any) -> str:
+        assert self._predictor is not None
+        assert self._decoder is not None
         try:
             input_names = self._predictor.get_input_names()
             if len(input_names) != 1:
@@ -474,10 +500,14 @@ def _single_channel_value(value: Any, default: float) -> float:
 
 def _preprocess_image(image_path: Path, spec: _PreprocessSpec) -> Any:
     try:
-        import numpy as np
         image = load_rgb_image(image_path)
     except Exception as exc:
         raise PaddleOCRNotReadyError(f"无法读取公式图片：{image_path}") from exc
+    return _preprocess_rgb_image(image, spec)
+
+
+def _preprocess_rgb_image(image: Any, spec: _PreprocessSpec) -> Any:
+    import numpy as np
 
     if spec.family == "unimernet":
         assert spec.input_size is not None

@@ -37,7 +37,7 @@ jobs:
       - name: Run regression tests
         shell: pwsh
         run: |
-          python -m unittest formula_ocr_app.recognition_tests formula_ocr_app.update_tests formula_ocr_app.runtime_tests
+          python -m unittest formula_ocr_app.recognition_tests formula_ocr_app.update_tests formula_ocr_app.runtime_tests formula_ocr_app.ui_tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($check in @("--ui-self-test", "--word-mathml-self-test", "--runtime-self-test")) {
             python formula_ocr_app\app.py $check

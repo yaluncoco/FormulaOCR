@@ -10,6 +10,13 @@ from xml.etree import ElementTree
 
 from PIL import Image
 
+try:
+    from formula_ocr_app.numeric_intervals import normalize_numeric_formula
+except ModuleNotFoundError as exc:
+    if exc.name != "formula_ocr_app":
+        raise
+    from numeric_intervals import normalize_numeric_formula
+
 try:  # Primary, high-fidelity LaTeX -> MathML conversion.
     from latex2mathml.converter import convert as _latex2mathml_convert
 except Exception:  # pragma: no cover - falls back to the built-in parser.
@@ -210,7 +217,7 @@ def clean_recognized_latex(latex: str) -> str:
     text = _normalize_named_operators(text)
     text = _normalize_ocr_relation_artifacts(text)
     text = _normalize_named_operator_limits(text)
-    return text.strip()
+    return normalize_numeric_formula(text) or text.strip()
 
 
 def _normalize_spaced_roman_words(text: str) -> str:

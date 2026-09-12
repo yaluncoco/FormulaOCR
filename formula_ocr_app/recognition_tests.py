@@ -83,6 +83,11 @@ from formula_ocr_app.model_downloader import (
     _install_archive as _install_official_archive,
 )
 from formula_ocr_app.model_runtime import create_recognizer_backend, remove_model
+from formula_ocr_app.numeric_intervals import (
+    numeric_interval_needs_retry,
+    recover_numeric_interval,
+    split_numeric_interval_image,
+)
 from formula_ocr_app.onnx_runtime import (
     execution_providers,
     repeated_token_suffix_start,
@@ -258,6 +263,34 @@ class RecognitionPostprocessTests(unittest.TestCase):
             r"M(i,j) > 0.5",
         )
 
+    def test_numeric_interval_keeps_both_percentages_and_joins_digits(self) -> None:
+        for formula in (
+            r"\left[ - 4 5 . 6 7 \% , 1 9 . 3 8 \% \right]",
+            r"[-45.67%, 19.38%]",
+        ):
+            with self.subTest(formula=formula):
+                cleaned = clean_recognized_latex(formula)
+                self.assertEqual(cleaned, r"[-45.67\%, 19.38\%]")
+                self.assertEqual(clean_recognized_latex(cleaned), cleaned)
+        self.assertEqual(
+            clean_recognized_latex(r"\left( - 0 . 5 , + 1 0 0 \% \right]"),
+            r"(-0.5, +100\%]",
+        )
+        self.assertEqual(clean_recognized_latex(r"- 1 2 . 5 \%"), r"-12.5\%")
+
+    def test_interval_cleanup_does_not_change_text_scripts_or_general_formulas(self) -> None:
+        for formula in (
+            r"\text{range [1 2, 3 4]}",
+            r"[x^2, y_3]",
+            r"\begin{bmatrix}1&2\\3&4\end{bmatrix}",
+            r"[1, 2, 3]",
+            r"[1\,2, 3\,4]",
+            r"\frac1 2",
+            r"x^2 3",
+        ):
+            with self.subTest(formula=formula):
+                self.assertEqual(clean_recognized_latex(formula), formula)
+
     def test_cases_does_not_keep_a_second_ocr_added_left_brace(self) -> None:
         self.assertEqual(
             clean_recognized_latex(
@@ -287,6 +320,114 @@ class ImageInputTests(unittest.TestCase):
         self.assertEqual(converted.mode, "RGB")
         self.assertEqual(converted.getpixel((0, 0)), (255, 255, 255))
         self.assertEqual(converted.getpixel((8, 5)), (0, 0, 0))
+
+
+class NumericIntervalRecoveryTests(unittest.TestCase):
+    broken = "[left- 4 5.6 7 " + "\\"
+
+    def _image(self, name: str = "percent_interval"):
+        from PIL import Image
+
+        with Image.open(Path(__file__).with_name("testdata") / f"{name}.png") as source:
+            return source.convert("RGB")
+
+    def test_real_screenshot_layout_preserves_delimiters_at_multiple_sizes(self) -> None:
+        from PIL import Image
+
+        source = self._image()
+        for scale in (0.75, 1, 1.5, 2):
+            with self.subTest(scale=scale):
+                resized = source.resize(
+                    (round(source.width * scale), round(source.height * scale)),
+                    Image.Resampling.LANCZOS,
+                )
+                parts = split_numeric_interval_image(resized)
+                self.assertIsNotNone(parts)
+                self.assertEqual((parts[0], parts[-1]), ("[", "]"))
+        parts = split_numeric_interval_image(self._image("open_percent_interval"))
+        self.assertIsNotNone(parts)
+        self.assertEqual((parts[0], parts[-1]), ("(", ")"))
+
+    def test_retry_recovers_only_numbers_read_from_both_endpoint_images(self) -> None:
+        predict = mock.Mock(side_effect=[r"- 4 5.6 7 \%", r"1 9.3 8 \%"])
+        result = recover_numeric_interval(self._image(), self.broken, predict)
+        self.assertEqual(result, r"[-45.67\%, 19.38\%]")
+        self.assertEqual(predict.call_count, 2)
+        left, right = [call.args[0] for call in predict.call_args_list]
+        self.assertGreater(left.width, right.width)  # Left endpoint includes the minus.
+        self.assertGreater(left.height, 0)
+
+    def test_valid_and_non_numeric_formulas_never_retry(self) -> None:
+        predict = mock.Mock(side_effect=AssertionError("Unexpected retry"))
+        for formula in (
+            r"[-45.67\%, 19.38\%]",
+            r"\left(-0.5, +100\%\right]",
+            r"x^2+y^2=1",
+            r"[a,b]",
+            r"\begin{bmatrix}1&2\\3&4\end{bmatrix}",
+            r"\text{left 12}",
+        ):
+            with self.subTest(formula=formula):
+                self.assertFalse(numeric_interval_needs_retry(formula))
+                self.assertEqual(recover_numeric_interval(None, formula, predict), formula)
+        predict.assert_not_called()
+
+    def test_conflicting_or_non_numeric_endpoints_keep_original_result(self) -> None:
+        for predictions in (
+            [r"-45.76\%"],
+            [r"+45.67\%"],
+            [r"-45.67\%", r"x+1"],
+            [r"-45.67\%", r"19.38\%\%"],
+            [r"-45.67\%", r"119.38\%"],
+            [r"-45.67\%", r"\frac{19}{38}"],
+        ):
+            with self.subTest(predictions=predictions):
+                predict = mock.Mock(side_effect=predictions)
+                self.assertEqual(
+                    recover_numeric_interval(self._image(), self.broken, predict),
+                    self.broken,
+                )
+                self.assertLessEqual(predict.call_count, 2)
+
+    def test_retry_cannot_remove_known_percent_or_change_second_endpoint(self) -> None:
+        broken = r"\left-45.67\%,19.38\%\right]"
+        for predictions in (
+            ["-45.67"],
+            [r"-45.67\%", r"19.83\%"],
+            [r"-45.67\%", "19.38"],
+        ):
+            with self.subTest(predictions=predictions):
+                self.assertEqual(
+                    recover_numeric_interval(
+                        self._image(), broken, mock.Mock(side_effect=predictions)
+                    ),
+                    broken,
+                )
+
+    def test_decimal_points_and_multiple_commas_do_not_trigger_image_repair(self) -> None:
+        for name in ("decimal_pair_without_comma", "three_numeric_values"):
+            with self.subTest(name=name):
+                source = self._image(name)
+                self.assertIsNone(split_numeric_interval_image(source))
+                predict = mock.Mock(side_effect=AssertionError("Ambiguous layout"))
+                self.assertEqual(recover_numeric_interval(source, self.broken, predict), self.broken)
+                predict.assert_not_called()
+
+    def test_blank_dark_small_and_multiline_images_are_declined(self) -> None:
+        from PIL import Image, ImageOps
+
+        source = self._image()
+        multiline = Image.new("RGB", (source.width, source.height * 2), "white")
+        multiline.paste(source, (0, 0))
+        multiline.paste(source, (0, source.height))
+        for image in (
+            Image.new("RGB", source.size, "white"),
+            ImageOps.invert(source),
+            source.resize((70, 19)),
+            multiline,
+        ):
+            with self.subTest(size=image.size):
+                self.assertIsNone(split_numeric_interval_image(image))
 
 
 class DirectPaddleRecognizerTests(unittest.TestCase):
@@ -339,6 +480,35 @@ class DirectPaddleRecognizerTests(unittest.TestCase):
 
         self.assertEqual(int(gray[0, 0]), 76)
         self.assertEqual(int(gray[0, 1]), 29)
+
+    def test_incomplete_interval_reuses_loaded_predictor_for_two_crops(self) -> None:
+        recognizer = PaddleFormulaRecognizer(model_name="PP-FormulaNet_plus-S")
+        recognizer._predictor = object()
+        recognizer._preprocess_spec = _PreprocessSpec(
+            family="unimernet", input_size=(384, 384)
+        )
+        image_path = Path(__file__).with_name("testdata") / "percent_interval.png"
+        with mock.patch.object(
+            recognizer, "_predict_tensor",
+            side_effect=[NumericIntervalRecoveryTests.broken, r"-45.67\%", r"19.38\%"],
+        ) as predict:
+            self.assertEqual(recognizer.predict(image_path), r"[-45.67\%, 19.38\%]")
+        self.assertEqual(predict.call_count, 3)
+        for call in predict.call_args_list:
+            self.assertEqual(call.args[0].shape, (1, 1, 384, 384))
+
+    def test_optional_interval_retry_failure_preserves_first_output(self) -> None:
+        recognizer = PaddleFormulaRecognizer(model_name="PP-FormulaNet_plus-S")
+        recognizer._predictor = object()
+        recognizer._preprocess_spec = _PreprocessSpec(
+            family="unimernet", input_size=(384, 384)
+        )
+        image_path = Path(__file__).with_name("testdata") / "percent_interval.png"
+        with mock.patch.object(
+            recognizer, "_predict_tensor",
+            side_effect=[NumericIntervalRecoveryTests.broken, OSError("retry failed")],
+        ):
+            self.assertEqual(recognizer.predict(image_path), NumericIntervalRecoveryTests.broken)
 
     def test_direct_predictor_receives_tensor_and_decodes_one_output(self) -> None:
         import numpy as np

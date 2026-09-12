@@ -62,6 +62,8 @@ Source: "{#MyRepoRoot}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyRepoRoot}\NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyRepoRoot}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyRepoRoot}\docs\optimization-2026-09.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "{#MyRepoRoot}\docs\ui-review-2026-09.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "{#MyRepoRoot}\docs\recognition-review-2026-09.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 
 [InstallDelete]
 Type: filesandordirs; Name: "{app}\_internal"

@@ -31,16 +31,22 @@ __all__ = [
     "ACCENT_SOFT",
     "APP_BG",
     "BORDER",
+    "FlowFrame",
     "ModelFilterChips",
     "ModelPicker",
     "PANEL_BG",
     "RoundedButton",
     "RoundedChoice",
     "RoundedPanel",
+    "ResponsiveRow",
     "SURFACE_SUBTLE",
     "SlimScrollbar",
     "TEXT_PRIMARY",
     "TEXT_SECONDARY",
+    "Toast",
+    "WrappingLabel",
+    "fit_window_to_screen",
+    "ui_pixels",
     "_ScreenArea",
     "_anchored_popup_geometry",
     "_enable_popup_row_keyboard_navigation",
@@ -48,6 +54,182 @@ __all__ = [
     "_rounded_rect",
     "_show_anchored_popup",
 ]
+
+
+def ui_pixels(widget: tk.Misc, value: float) -> int:
+    """Scale a 96-DPI pixel dimension alongside Tk's point-sized fonts."""
+
+    return max(1, round(value * float(widget.tk.call("tk", "scaling")) * 0.75))
+
+
+def fit_window_to_screen(
+    window: tk.Toplevel | tk.Tk,
+    size: tuple[int, int],
+    minimum: tuple[int, int],
+) -> None:
+    area = _monitor_work_area(window.master or window)
+    available_width = max(1, area.right - area.left - ui_pixels(window, 32))
+    available_height = max(1, area.bottom - area.top - ui_pixels(window, 64))
+    width = min(ui_pixels(window, size[0]), available_width)
+    height = min(ui_pixels(window, size[1]), available_height)
+    window.geometry(f"{width}x{height}")
+    window.minsize(
+        min(ui_pixels(window, minimum[0]), width),
+        min(ui_pixels(window, minimum[1]), height),
+    )
+
+
+class WrappingLabel(tk.Label):
+    """Wrap to the allocated width without forcing the window to grow."""
+
+    def __init__(self, parent: tk.Misc, **kwargs) -> None:
+        kwargs.setdefault("width", 1)
+        kwargs.setdefault("wraplength", ui_pixels(parent, 600))
+        kwargs.setdefault("justify", tk.LEFT)
+        kwargs.setdefault("anchor", tk.W)
+        super().__init__(parent, **kwargs)
+        self.bind("<Configure>", self._resize, add="+")
+
+    def _resize(self, event: tk.Event) -> None:
+        width = max(1, event.width - 2 * int(self.cget("padx")) - 4)
+        if int(self.cget("wraplength")) != width:
+            self.configure(wraplength=width)
+
+
+class FlowFrame(tk.Frame):
+    """A toolbar that keeps controls at their natural size and wraps rows."""
+
+    def __init__(self, parent: tk.Misc, *, gap: int = 8, align: str = "left", **kwargs) -> None:
+        super().__init__(parent, **kwargs)
+        self.gap = ui_pixels(self, gap)
+        self.align = align
+        self.items: list[tk.Widget] = []
+        self._layout_after_id: str | None = None
+        self.bind("<Configure>", self._schedule_layout, add="+")
+        self.bind("<Destroy>", self._cancel_layout, add="+")
+
+    @property
+    def preferred_width(self) -> int:
+        return sum(item.winfo_reqwidth() for item in self.items) + self.gap * max(0, len(self.items) - 1)
+
+    def add(self, widget: tk.Widget) -> None:
+        self.items.append(widget)
+        widget.bind("<Configure>", self._schedule_layout, add="+")
+        self._schedule_layout()
+
+    def _schedule_layout(self, _event: tk.Event | None = None) -> None:
+        if self._layout_after_id is None:
+            self._layout_after_id = self.after_idle(self._layout)
+
+    def _layout(self) -> None:
+        self._layout_after_id = None
+        if not self.items:
+            return
+        minimum_width = max(item.winfo_reqwidth() for item in self.items)
+        available = max(minimum_width, self.winfo_width())
+        rows: list[list[tk.Widget]] = [[]]
+        row_width = 0
+        for item in self.items:
+            width = item.winfo_reqwidth()
+            if rows[-1] and row_width + self.gap + width > available:
+                rows.append([])
+                row_width = 0
+            row_width += (self.gap if rows[-1] else 0) + width
+            rows[-1].append(item)
+        y = 0
+        for row in rows:
+            height = max(item.winfo_reqheight() for item in row)
+            width = sum(item.winfo_reqwidth() for item in row) + self.gap * (len(row) - 1)
+            x = max(0, available - width) if self.align == "right" else 0
+            for item in row:
+                item.place(x=x, y=y + (height - item.winfo_reqheight()) // 2)
+                x += item.winfo_reqwidth() + self.gap
+            y += height + self.gap
+        self.configure(width=minimum_width, height=y - self.gap)
+
+    def _cancel_layout(self, event: tk.Event) -> None:
+        if event.widget is self and self._layout_after_id is not None:
+            self.after_cancel(self._layout_after_id)
+            self._layout_after_id = None
+
+
+class ResponsiveRow(tk.Frame):
+    """Keep a heading beside its actions when they fit, otherwise stack them."""
+
+    def __init__(self, parent: tk.Misc, *, gap: int = 8, **kwargs) -> None:
+        super().__init__(parent, **kwargs)
+        self.gap = ui_pixels(self, gap)
+        self.leading: tk.Widget | None = None
+        self.trailing: tk.Widget | None = None
+        self._stacked: bool | None = None
+        self.columnconfigure(1, weight=1)
+        self.bind("<Configure>", self._layout, add="+")
+
+    def set_widgets(self, leading: tk.Widget, trailing: tk.Widget) -> None:
+        self.leading, self.trailing = leading, trailing
+        leading.bind("<Configure>", self._layout, add="+")
+        trailing.bind("<Configure>", self._layout, add="+")
+        self._layout()
+
+    def _layout(self, _event: tk.Event | None = None) -> None:
+        if self.leading is None or self.trailing is None:
+            return
+        trailing_width = self.trailing.preferred_width if isinstance(self.trailing, FlowFrame) else self.trailing.winfo_reqwidth()
+        stacked = self.leading.winfo_reqwidth() + trailing_width + self.gap > self.winfo_width()
+        if self._stacked == stacked:
+            return
+        self._stacked = stacked
+        if stacked:
+            self.leading.grid(row=0, column=0, columnspan=2, sticky="w")
+            self.trailing.grid(row=1, column=0, columnspan=2, sticky="ew", padx=0, pady=(self.gap, 0))
+        else:
+            self.leading.grid(row=0, column=0, columnspan=1, sticky="w")
+            self.trailing.grid(row=0, column=1, columnspan=1, sticky="e" if not isinstance(self.trailing, FlowFrame) else "ew", padx=(self.gap, 0), pady=0)
+
+
+class Toast(tk.Frame):
+    """One reusable, non-modal notice; repeated actions restart its timer."""
+
+    def __init__(self, parent: tk.Misc) -> None:
+        super().__init__(parent, bd=0, highlightthickness=1)
+        self.label = tk.Label(
+            self, font=("Microsoft YaHei UI", 10, "bold"),
+            padx=ui_pixels(self, 14), pady=ui_pixels(self, 9), justify=tk.LEFT,
+        )
+        self.label.pack()
+        self._after_id: str | None = None
+        self.bind("<Destroy>", self._on_destroy, add="+")
+
+    def show(self, text: str, *, anchor: tk.Widget, warning: bool = False, duration: int = 2400) -> None:
+        self.hide()
+        bg, fg, border = ("#fff4df", "#8a5a13", "#f2d39a") if warning else ("#e8f7ef", "#187044", "#b7dec8")
+        self.configure(bg=bg, highlightbackground=border)
+        margin = ui_pixels(self, 12)
+        available = max(1, self.master.winfo_width() - 2 * margin)
+        self.label.configure(
+            text=text, bg=bg, fg=fg,
+            wraplength=max(1, min(ui_pixels(self, 400), available - ui_pixels(self, 30))),
+        )
+        self.update_idletasks()
+        width, height = min(available, self.winfo_reqwidth()), self.winfo_reqheight()
+        x = anchor.winfo_rootx() - self.master.winfo_rootx() + anchor.winfo_width() - width
+        y = anchor.winfo_rooty() - self.master.winfo_rooty() + anchor.winfo_height() + margin
+        x = max(margin, min(x, self.master.winfo_width() - width - margin))
+        y = max(margin, min(y, self.master.winfo_height() - height - margin))
+        self.place(x=x, y=y, width=width, height=height)
+        self.lift()
+        self._after_id = self.after(duration, self.hide)
+
+    def hide(self) -> None:
+        if self._after_id is not None:
+            self.after_cancel(self._after_id)
+            self._after_id = None
+        self.place_forget()
+
+    def _on_destroy(self, event: tk.Event) -> None:
+        if event.widget is self and self._after_id is not None:
+            self.after_cancel(self._after_id)
+            self._after_id = None
 
 
 @dataclass(frozen=True)
@@ -212,13 +394,17 @@ def _enable_popup_row_keyboard_navigation(
     rows: list[tk.Widget],
     *,
     initial_index: int = 0,
+    see_row=None,
 ) -> None:
     if not rows:
         return
 
     def focus_row(index: int) -> str:
         if popup.winfo_exists():
-            rows[index % len(rows)].focus_set()
+            row = rows[index % len(rows)]
+            row.focus_set()
+            if see_row is not None:
+                see_row(row)
         return "break"
 
     for index, row in enumerate(rows):
@@ -293,6 +479,7 @@ class RoundedButton(tk.Canvas):
             highlightthickness=0,
             bd=0,
             takefocus=True,
+            cursor="hand2",
         )
         self.command = command
         self.radius = radius
@@ -304,11 +491,19 @@ class RoundedButton(tk.Canvas):
         self.selected_fg = selected_fg
         self.text = text
         self.font = font
+        self._font = tkfont.Font(root=self, font=font)
+        self._minimum_width = width
+        self._minimum_height = height
+        self._hover = False
         self.is_selected = False
         self.is_disabled = False
+        self._update_requested_size()
         self._draw()
-        self.bind("<Enter>", lambda _event: self._draw(hover=True))
-        self.bind("<Leave>", lambda _event: self._draw())
+        self.bind("<Configure>", lambda _event: self._draw())
+        self.bind("<Enter>", lambda _event: self._set_hover(True))
+        self.bind("<Leave>", lambda _event: self._set_hover(False))
+        self.bind("<FocusIn>", lambda _event: self._draw())
+        self.bind("<FocusOut>", lambda _event: self._draw())
         self.bind("<Button-1>", self._click)
         self.bind("<Return>", self._keyboard_click)
         self.bind("<space>", self._keyboard_click)
@@ -319,14 +514,29 @@ class RoundedButton(tk.Canvas):
 
     def set_text(self, text: str) -> None:
         self.text = text
+        self._update_requested_size()
         self._draw()
 
     def set_width(self, width: int) -> None:
-        self.configure(width=max(2, int(width)))
+        self._minimum_width = width
+        self._update_requested_size()
         self._draw()
 
     def set_disabled(self, disabled: bool) -> None:
         self.is_disabled = disabled
+        self.configure(cursor="arrow" if disabled else "hand2", takefocus=not disabled)
+        self._draw()
+
+    def _update_requested_size(self) -> None:
+        # Canvas dimensions are pixels, while positive Tk font sizes are points.
+        # Both the minimum size and the measured caption must fit at this DPI.
+        self.configure(
+            width=max(ui_pixels(self, self._minimum_width), self._font.measure(self.text) + ui_pixels(self, 24)),
+            height=max(ui_pixels(self, self._minimum_height), self._font.metrics("linespace") + ui_pixels(self, 12)),
+        )
+
+    def _set_hover(self, hover: bool) -> None:
+        self._hover = hover
         self._draw()
 
     def _click(self, _event: tk.Event) -> None:
@@ -337,12 +547,13 @@ class RoundedButton(tk.Canvas):
         self._click(_event)
         return "break"
 
-    def _draw(self, hover: bool = False) -> None:
+    def _draw(self) -> None:
         self.delete("all")
-        width = max(2, int(self.winfo_reqwidth()))
-        height = max(2, int(self.winfo_reqheight()))
+        width = max(2, self.winfo_width() if self.winfo_width() > 1 else self.winfo_reqwidth())
+        height = max(2, self.winfo_height() if self.winfo_height() > 1 else self.winfo_reqheight())
+        radius = min(ui_pixels(self, self.radius), (width - 2) // 2, (height - 2) // 2)
         selected = self.is_selected and self.selected_bg is not None
-        fill = self.selected_bg if selected else (self.active_bg if hover else self.normal_bg)
+        fill = self.selected_bg if selected else (self.active_bg if self._hover else self.normal_bg)
         outline = self.selected_bg if selected else self.border
         text_color = self.selected_fg if selected else self.fg
         if self.is_disabled:
@@ -355,7 +566,7 @@ class RoundedButton(tk.Canvas):
             1,
             width - 1,
             height - 1,
-            self.radius,
+            radius,
             fill=fill,
             outline=outline,
             width=1,
@@ -365,8 +576,15 @@ class RoundedButton(tk.Canvas):
             height // 2,
             text=self.text,
             fill=text_color,
-            font=self.font,
+            font=self._font,
+            tags="caption",
         )
+        if not self.is_disabled and self.focus_get() is self:
+            _rounded_rect(
+                self, 3, 3, width - 3, height - 3, max(1, radius - 2),
+                fill="", outline="#ffffff" if fill == ACCENT else ACCENT,
+                width=2, tags="focus",
+            )
 
 
 class RoundedChoice(tk.Frame):
@@ -423,12 +641,12 @@ class RoundedChoice(tk.Frame):
             self._close_popup()
 
     def _button_label(self, value: str) -> str:
-        font = tkfont.Font(root=self, font=self.button.font)
-        available = max(24, self.choice_width - 34)
+        font = self.button._font
+        available = max(1, ui_pixels(self, self.choice_width - 24) - font.measure("  ▾"))
         if font.measure(value) <= available:
             return f"{value}  ▾"
         suffix = "…"
-        low, high = 1, len(value)
+        low, high = 0, len(value)
         while low < high:
             middle = (low + high + 1) // 2
             if font.measure(value[:middle] + suffix) <= available:
@@ -469,6 +687,9 @@ class RoundedChoice(tk.Frame):
                 bg=row_bg,
                 cursor="hand2",
                 takefocus=True,
+                highlightthickness=1,
+                highlightbackground=row_bg,
+                highlightcolor=ACCENT,
                 padx=10,
                 pady=7,
             )
@@ -570,7 +791,7 @@ class RoundedChoice(tk.Frame):
             pass
 
 
-class ModelFilterChips(tk.Frame):
+class ModelFilterChips(FlowFrame):
     """Reusable quick filters shared by the picker and model manager."""
 
     def __init__(
@@ -580,19 +801,18 @@ class ModelFilterChips(tk.Frame):
         variable: tk.StringVar | None = None,
         bg: str = PANEL_BG,
     ) -> None:
-        super().__init__(parent, bg=bg, highlightthickness=0, bd=0)
+        super().__init__(parent, bg=bg, highlightthickness=0, bd=0, gap=5)
         self.variable = variable or tk.StringVar(master=self, value="all")
         valid_keys = {key for key, _label in MODEL_QUICK_FILTERS}
         if self.variable.get() not in valid_keys:
             self.variable.set("all")
         self.buttons: dict[str, RoundedButton] = {}
-        font = tkfont.Font(root=self, font=("Microsoft YaHei UI", 8, "bold"))
         for key, label in MODEL_QUICK_FILTERS:
             button = RoundedButton(
                 self,
                 text=label,
                 command=lambda selected=key: self.variable.set(selected),
-                width=max(52, font.measure(label) + 24),
+                width=52,
                 height=28,
                 radius=10,
                 bg="#ffffff",
@@ -602,7 +822,7 @@ class ModelFilterChips(tk.Frame):
                 selected_fg="#ffffff",
                 font=("Microsoft YaHei UI", 8, "bold"),
             )
-            button.pack(side=tk.LEFT, padx=(0, 5))
+            self.add(button)
             self.buttons[key] = button
         self._variable_trace = self.variable.trace_add("write", self._sync)
         self.bind("<Destroy>", self._on_destroy, add="+")
@@ -712,8 +932,6 @@ class ModelPicker(tk.Frame):
             label = f"{spec.compact_name}  ▾"
         else:
             label = "选择已下载模型  ▾"
-        font = tkfont.Font(root=self, font=self.button.font)
-        self.button.set_width(min(330, max(238, font.measure(label) + 42)))
         self.button.set_text(label)
 
     @staticmethod
@@ -859,6 +1077,9 @@ class ModelPicker(tk.Frame):
                     bg=row_bg,
                     cursor="hand2",
                     takefocus=True,
+                    highlightthickness=1,
+                    highlightbackground=row_bg,
+                    highlightcolor=ACCENT,
                     padx=8,
                     pady=7,
                 )
@@ -899,7 +1120,7 @@ class ModelPicker(tk.Frame):
                     anchor=tk.E,
                 )
                 state_badge.grid(row=0, column=1, sticky="e", padx=(8, 0))
-                meta = tk.Label(
+                meta = WrappingLabel(
                     row,
                     text=(
                         f"{spec.provider}  ·  {spec.size_label}  ·  {spec.languages}"
@@ -911,7 +1132,7 @@ class ModelPicker(tk.Frame):
                     anchor=tk.W,
                 )
                 meta.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
-                detail = tk.Label(
+                detail = WrappingLabel(
                     row,
                     text=spec.best_for,
                     bg=row_bg,
@@ -972,26 +1193,37 @@ class ModelPicker(tk.Frame):
             ),
             0,
         )
-        _enable_popup_row_keyboard_navigation(
-            popup,
-            keyboard_rows,
-            initial_index=selected_index,
-        )
+        def see_row(row: tk.Widget) -> None:
+            list_canvas.update_idletasks()
+            total = max(1, list_frame.winfo_height())
+            top, bottom = row.winfo_y(), row.winfo_y() + row.winfo_height()
+            view_top = list_canvas.yview()[0] * total
+            view_bottom = view_top + list_canvas.winfo_height()
+            if top < view_top:
+                list_canvas.yview_moveto(top / total)
+            elif bottom > view_bottom:
+                list_canvas.yview_moveto((bottom - list_canvas.winfo_height()) / total)
 
         list_frame.update_idletasks()
         sync_scroll_region()
         list_canvas.yview_moveto(0.0)
 
         popup.update_idletasks()
-        width = max(430, self.winfo_width() + 140)
+        width = max(ui_pixels(self, 430), self.winfo_width() + ui_pixels(self, 140))
         work_area = _monitor_work_area(self)
         max_height = max(300, int((work_area.bottom - work_area.top) * 0.78))
-        list_height = min(390, max(130, len(available_models) * 72 + 8))
-        list_shell.configure(height=list_height)
-        list_shell.pack_propagate(False)
+        list_height = min(ui_pixels(self, 390), max(ui_pixels(self, 100), list_frame.winfo_reqheight()))
+        list_shell.configure(height=list_height, width=width - ui_pixels(self, 24))
+        list_shell.grid_propagate(False)
         popup.update_idletasks()
         height = min(popup.winfo_reqheight(), max_height)
         _show_anchored_popup(popup, self, width, height, gap=6, align="right")
+        _enable_popup_row_keyboard_navigation(
+            popup,
+            keyboard_rows,
+            initial_index=selected_index,
+            see_row=see_row,
+        )
         # RoundedButton invokes its command on <Button-1>.  Installing the
         # root-level outside-click binding synchronously would let that same
         # event bubble to the root and immediately close the popup again.
@@ -1110,7 +1342,8 @@ class SlimScrollbar(tk.Canvas):
     ) -> None:
         super().__init__(
             parent,
-            width=width,
+            width=ui_pixels(parent, width),
+            height=1,
             bg=bg,
             highlightthickness=0,
             bd=0,

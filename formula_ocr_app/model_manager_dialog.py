@@ -34,10 +34,14 @@ try:
         PANEL_BG,
         TEXT_PRIMARY,
         TEXT_SECONDARY,
+        FlowFrame,
         ModelFilterChips,
         RoundedButton,
         RoundedChoice,
         SlimScrollbar,
+        WrappingLabel,
+        fit_window_to_screen,
+        ui_pixels,
     )
 except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
     if exc.name != "formula_ocr_app":
@@ -68,10 +72,14 @@ except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
         PANEL_BG,
         TEXT_PRIMARY,
         TEXT_SECONDARY,
+        FlowFrame,
         ModelFilterChips,
         RoundedButton,
         RoundedChoice,
         SlimScrollbar,
+        WrappingLabel,
+        fit_window_to_screen,
+        ui_pixels,
     )
 
 
@@ -91,8 +99,7 @@ def show_model_manager_dialog(
 
     window = tk.Toplevel(parent)
     window.title("模型管理")
-    window.geometry("1040x650")
-    window.minsize(920, 520)
+    fit_window_to_screen(window, (1040, 720), (760, 580))
     window.configure(bg=APP_BG)
     window.transient(parent)
     window.columnconfigure(0, weight=1)
@@ -108,24 +115,21 @@ def show_model_manager_dialog(
         fg=TEXT_PRIMARY,
         font=("Microsoft YaHei UI", 17, "bold"),
     ).pack(anchor=tk.W)
-    tk.Label(
+    WrappingLabel(
         manager_header,
         text="在这里下载或删除模型；下载完成后，在主界面下拉框中选择识别模型。",
         bg=APP_BG,
         fg=TEXT_SECONDARY,
         font=("Microsoft YaHei UI", 9),
-    ).pack(anchor=tk.W, pady=(3, 0))
-    tk.Label(
+    ).pack(fill=tk.X, pady=(3, 0))
+    WrappingLabel(
         manager_header,
-        text=(
-            f"运行时下载缓存：{runtime_cache_dir()}  ·  "
-            "打包目录 _internal 仅作为只读随包资源，不写入下载文件"
-        ),
+        text=f"缓存目录：{runtime_cache_dir()}",
         bg=APP_BG,
         fg=TEXT_SECONDARY,
         font=("Microsoft YaHei UI", 8),
         anchor=tk.W,
-    ).pack(anchor=tk.W, pady=(2, 0))
+    ).pack(fill=tk.X, pady=(2, 0))
 
     filter_bar = tk.Frame(window, bg=APP_BG)
     filter_bar.grid(
@@ -180,7 +184,7 @@ def show_model_manager_dialog(
         fg=TEXT_SECONDARY,
         font=("Microsoft YaHei UI", 8),
         anchor=tk.E,
-    ).grid(row=0, column=3, sticky="e", padx=(10, 0))
+    ).grid(row=2, column=0, columnspan=3, sticky="e", pady=(6, 0))
 
     manager_quick_filter_var = tk.StringVar(value="all")
     tk.Label(
@@ -194,7 +198,7 @@ def show_model_manager_dialog(
         filter_bar,
         variable=manager_quick_filter_var,
         bg=APP_BG,
-    ).grid(row=1, column=1, columnspan=3, sticky="w", pady=(8, 0))
+    ).grid(row=1, column=1, columnspan=2, sticky="ew", pady=(8, 0))
 
     columns = ("provider", "model", "size", "scenario", "state")
     tree = ttk.Treeview(
@@ -220,7 +224,7 @@ def show_model_manager_dialog(
     }
     for column in columns:
         tree.heading(column, text=headings[column])
-        tree.column(column, width=widths[column], anchor=tk.W)
+        tree.column(column, width=ui_pixels(window, widths[column]), minwidth=ui_pixels(window, widths[column]), anchor=tk.W)
     tree_scrollbar = SlimScrollbar(
         window,
         command=tree.yview,
@@ -233,6 +237,9 @@ def show_model_manager_dialog(
     tree.configure(yscrollcommand=tree_scrollbar.set)
     tree.grid(row=2, column=0, sticky="nsew", padx=(20, 0))
     tree_scrollbar.grid(row=2, column=1, sticky="ns", padx=(0, 20))
+    tree_horizontal_scrollbar = ttk.Scrollbar(window, orient=tk.HORIZONTAL, command=tree.xview)
+    tree_horizontal_scrollbar.grid(row=3, column=0, sticky="ew", padx=(20, 0))
+    tree.configure(xscrollcommand=tree_horizontal_scrollbar.set)
 
     detail = tk.Frame(
         window,
@@ -241,7 +248,7 @@ def show_model_manager_dialog(
         highlightthickness=1,
     )
     detail.grid(
-        row=3,
+        row=4,
         column=0,
         columnspan=2,
         sticky="ew",
@@ -250,10 +257,6 @@ def show_model_manager_dialog(
     )
     detail.columnconfigure(1, weight=1)
     detail_title_var = tk.StringVar(value="选择一个模型查看详情")
-    detail_meta_var = tk.StringVar()
-    detail_path_var = tk.StringVar()
-    detail_source_var = tk.StringVar()
-    detail_description_var = tk.StringVar()
     action_buttons: dict[str, RoundedButton] = {}
 
     def sync_action_buttons(model_id: str | None) -> None:
@@ -283,7 +286,7 @@ def show_model_manager_dialog(
         action_buttons["source"].set_disabled(not valid)
         action_buttons["terms"].set_disabled(not valid or not has_terms)
 
-    tk.Label(
+    WrappingLabel(
         detail,
         textvariable=detail_title_var,
         bg=PANEL_BG,
@@ -291,44 +294,26 @@ def show_model_manager_dialog(
         font=("Microsoft YaHei UI", 10, "bold"),
         anchor=tk.W,
     ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(9, 2))
-    tk.Label(
-        detail,
-        textvariable=detail_meta_var,
-        bg=PANEL_BG,
-        fg=TEXT_SECONDARY,
-        font=("Microsoft YaHei UI", 8),
-        anchor=tk.W,
-    ).grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 2))
-    tk.Label(
-        detail,
-        textvariable=detail_description_var,
-        bg=PANEL_BG,
-        fg=TEXT_PRIMARY,
-        font=("Microsoft YaHei UI", 8),
-        anchor=tk.W,
-        justify=tk.LEFT,
-        wraplength=850,
-    ).grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 3))
-    tk.Label(
-        detail,
-        textvariable=detail_path_var,
-        bg=PANEL_BG,
-        fg=TEXT_SECONDARY,
-        font=("Consolas", 8),
-        anchor=tk.W,
-        justify=tk.LEFT,
-        wraplength=850,
-    ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 2))
-    tk.Label(
-        detail,
-        textvariable=detail_source_var,
-        bg=PANEL_BG,
-        fg=TEXT_SECONDARY,
-        font=("Consolas", 8),
-        anchor=tk.W,
-        justify=tk.LEFT,
-        wraplength=850,
-    ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 9))
+    detail_body = tk.Frame(detail, bg=PANEL_BG)
+    detail_body.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 9))
+    detail_body.columnconfigure(0, weight=1)
+    detail_text = tk.Text(
+        detail_body, height=5, width=1, wrap=tk.WORD, state=tk.DISABLED,
+        bg=PANEL_BG, fg=TEXT_SECONDARY, font=("Microsoft YaHei UI", 9),
+        relief=tk.FLAT, bd=0, highlightthickness=0, cursor="arrow",
+        selectbackground=ACCENT_SOFT,
+    )
+    detail_text.grid(row=0, column=0, sticky="ew")
+    detail_scrollbar = SlimScrollbar(detail_body, command=detail_text.yview)
+    detail_scrollbar.grid(row=0, column=1, sticky="ns")
+    detail_text.configure(yscrollcommand=detail_scrollbar.set)
+
+    def set_detail_content(text: str) -> None:
+        detail_text.configure(state=tk.NORMAL)
+        detail_text.delete("1.0", tk.END)
+        detail_text.insert("1.0", text)
+        detail_text.configure(state=tk.DISABLED)
+        detail_text.yview_moveto(0)
 
     def update_detail(model_id: str | None = None) -> None:
         if model_id is None:
@@ -336,10 +321,7 @@ def show_model_manager_dialog(
             model_id = selection[0] if selection else None
         if not model_id or model_id not in MODEL_BY_ID:
             detail_title_var.set("选择一个模型查看详情")
-            detail_meta_var.set("")
-            detail_description_var.set("")
-            detail_path_var.set("")
-            detail_source_var.set("")
+            set_detail_content("")
             sync_action_buttons(None)
             return
         spec = get_model_spec(model_id)
@@ -350,24 +332,20 @@ def show_model_manager_dialog(
             + f"{spec.display_name}  ·  {status}"
         )
         terms_state = "需单独确认" if spec.requires_terms_ack else "无附加确认"
-        detail_meta_var.set(
+        meta = (
             f"供应商：{spec.provider}    模型 ID：{spec.model_id}    "
             f"后端：{spec.backend_label}    语言：{spec.languages}    "
             f"体积：{spec.size_label}    条款：{terms_state}"
         )
-        detail_description_var.set(
+        description = (
             f"{spec.description}  推荐场景：{spec.best_for}。"
         )
         if spec.requires_terms_ack:
-            detail_description_var.set(
-                detail_description_var.get()
-                + f"  许可/限制：{spec.license_label}；{spec.usage_restriction}"
-            )
-        detail_path_var.set(f"用户缓存：{model_user_cache_path(model_id)}")
+            description += f"  许可/限制：{spec.license_label}；{spec.usage_restriction}"
         source_text = f"下载源：{spec.download_url}"
         if spec.terms_url:
             source_text += f"\n上游条款：{spec.terms_url}"
-        detail_source_var.set(source_text)
+        set_detail_content("\n".join((meta, description, f"用户缓存：{model_user_cache_path(model_id)}", source_text)))
         sync_action_buttons(model_id)
 
     def open_source() -> None:
@@ -524,8 +502,8 @@ def show_model_manager_dialog(
         else:
             set_status(f"{spec.display_name} 没有可删除的用户缓存")
 
-    actions = tk.Frame(window, bg=APP_BG)
-    actions.grid(row=4, column=0, columnspan=2, sticky="e", padx=20, pady=18)
+    actions = FlowFrame(window, bg=APP_BG, align="right", gap=7)
+    actions.grid(row=5, column=0, columnspan=2, sticky="ew", padx=20, pady=18)
 
     def add_action(
         key: str,
@@ -548,7 +526,7 @@ def show_model_manager_dialog(
             border=ACCENT if primary else BORDER,
             font=("Microsoft YaHei UI", 9, "bold" if primary else "normal"),
         )
-        button.pack(side=tk.LEFT, padx=(0 if not action_buttons else 7, 0))
+        actions.add(button)
         action_buttons[key] = button
 
     add_action("download", "下载", download, 72, primary=True)

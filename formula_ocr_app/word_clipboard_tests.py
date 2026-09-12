@@ -126,6 +126,23 @@ CASES = (
     WordMathCase(name="log_exp", latex=r"\log(x)+\ln(y)+e^{i\pi}+1=0"),
     WordMathCase(name="multi_arg_function", latex=r"g\left(a,b,c\right)=h(a,b)+k(c)"),
     WordMathCase(name="interval_commas", latex=r"x\in[a,b],\ y\in(c,d)"),
+    WordMathCase(
+        name="percent_interval",
+        latex=r"[-45.67\%, 19.38\%]",
+        must_contain=(
+            "<mo>[</mo><mo>−</mo>",
+            "<mn>45.67</mn><mi>%</mi><mo>,</mo>",
+            "<mn>19.38</mn><mi>%</mi><mo>]</mo>",
+        ),
+    ),
+    WordMathCase(
+        name="mixed_numeric_interval",
+        latex=r"(-0.5, +100\%]",
+        must_contain=(
+            "<mo>(</mo><mo>−</mo><mn>0.5</mn>",
+            "<mo>+</mo><mn>100</mn><mi>%</mi><mo>]</mo>",
+        ),
+    ),
     WordMathCase(name="set_builder", latex=r"A=\{x\mid x>0, x\in\mathbb{R}\}"),
     WordMathCase(name="single_sum", latex=r"\sum_{i=1}^{n} x_i"),
     WordMathCase(name="integral", latex=r"\int_{0}^{1} x^2\,dx"),
