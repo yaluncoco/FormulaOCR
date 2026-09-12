@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 try:
     from formula_ocr_app.app_update import (
         LATEST_RELEASE_API,
+        RELEASES_URL,
         UpdateCheckError,
         fetch_latest_release,
         is_newer_version,
@@ -16,6 +18,7 @@ except ModuleNotFoundError as exc:  # Allows direct script execution.
         raise
     from app_update import (
         LATEST_RELEASE_API,
+        RELEASES_URL,
         UpdateCheckError,
         fetch_latest_release,
         is_newer_version,
@@ -67,6 +70,37 @@ class _FakeResponse:
 
 
 class UpdateTests(unittest.TestCase):
+    def test_api_rate_limit_uses_official_release_page_without_guessing_assets(self) -> None:
+        for status in (403, 429):
+            with self.subTest(status=status):
+                limited = mock.Mock(status_code=status)
+                page = mock.Mock(url=f"{RELEASES_URL}/tag/v1.1.6")
+                request_get = mock.Mock(side_effect=[limited, page])
+                release = fetch_latest_release("1.1.5", request_get=request_get)
+                self.assertTrue(release.update_available)
+                self.assertEqual(release.latest_version, "1.1.6")
+                self.assertEqual(release.installer_url, "")
+                self.assertEqual(release.release_url, page.url)
+                self.assertEqual(request_get.call_args.args[0], f"{RELEASES_URL}/latest")
+                self.assertTrue(request_get.call_args.kwargs["stream"])
+                self.assertEqual(request_get.call_args.kwargs["timeout"], (10, 20))
+                limited.close.assert_called_once()
+                page.close.assert_called_once()
+
+    def test_rate_limit_fallback_rejects_untrusted_or_invalid_release_redirects(self) -> None:
+        for url in (
+            "https://example.com/yaluncoco/FormulaOCR/releases/tag/v1.1.6",
+            "https://github.com/other/project/releases/tag/v1.1.6",
+            f"{RELEASES_URL}/latest",
+            f"{RELEASES_URL}/tag/v1.1.6-rc.1",
+        ):
+            with self.subTest(url=url):
+                page = mock.Mock(url=url)
+                request_get = mock.Mock(side_effect=[mock.Mock(status_code=403), page])
+                with self.assertRaises(UpdateCheckError):
+                    fetch_latest_release("1.1.5", request_get=request_get)
+                page.close.assert_called_once()
+
     def test_normalize_version_accepts_release_tag(self) -> None:
         self.assertEqual(normalize_version(" v1.2.3 "), "1.2.3")
         self.assertEqual(normalize_version("1.2.3-rc.1+build.8"), "1.2.3-rc.1")

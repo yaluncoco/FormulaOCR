@@ -15,6 +15,7 @@ FormulaOCR 是一个本地运行的多模型公式识别工具。它通过精简
 - 按钮根据屏幕缩放和文字尺寸自动适配，工具栏在窄窗口下换行；模型列表与详情支持滚动查看。
 - 复制 LaTeX、选中文本或其他公式格式后，在操作附近短暂显示复制结果；Word 富格式不可用时会明确提示已复制纯文本。
 - 顶部的更新图标会在启动后自动检查正式版；发现新版时显示红点，不弹窗打断操作。悬停或键盘聚焦可查看状态，点击红点查看更新说明和下载入口；无红点时点击可手动检查。
+- GitHub API 限流时改用官方发布页确认最新版本，仍可显示红点，并通过发布页查看说明和下载安装包。
 - 内置模型目录：12 个模型、8 个供应商，覆盖百度飞桨 `PP-FormulaNet/PP-FormulaNet+`、PaddlePaddle 官方 `LaTeX-OCR Rec`、上海 AI Lab `UniMERNet`、OpenDataLab/Cooper114 的量化 `UniMERNet Small ONNX`、RapidAI `RapidLaTeXOCR`、SakuraMathcraft `MathCraft Formula ONNX`、Breezedeus `Pix2Text MFR 1.5` 和 MixTeX `ZhEn`。
 - 主界面的模型下拉框只显示已下载或随包内置的模型，用于快速切换当前识别模型，选择结果会持久保存；已删除或尚未下载的旧选择不会被隐式使用。
 - “模型管理”负责浏览和下载完整模型目录，可按供应商、模型名称、使用场景和快捷标签筛选，查看状态、模型 ID、后端、用户缓存位置和下载源，并删除单个用户缓存或打开缓存目录。
@@ -130,7 +131,7 @@ python -m formula_ocr_app.app
 Windows 用户可以直接从 [GitHub Releases](https://github.com/yaluncoco/FormulaOCR/releases) 下载：
 
 ```text
-FormulaOCRSetup-1.1.6.exe
+FormulaOCRSetup-1.1.7.exe
 ```
 
 安装程序是 x64 Windows 的 Inno Setup 安装包，默认安装到当前用户目录，不需要管理员权限。安装后可以从开始菜单启动 FormulaOCR；桌面快捷方式在安装时可选。卸载时默认保留模型、设置和日志，避免重新安装后重复下载；如果确认不再需要，也可以选择同时清理 `%LOCALAPPDATA%\FormulaOCR`。
@@ -140,8 +141,8 @@ FormulaOCRSetup-1.1.6.exe
 每个 Release 同时提供 `.sha256` 校验文件。下载后可在 PowerShell 中验证：
 
 ```powershell
-Get-FileHash .\FormulaOCRSetup-1.1.6.exe -Algorithm SHA256
-Get-Content .\FormulaOCRSetup-1.1.6.exe.sha256
+Get-FileHash .\FormulaOCRSetup-1.1.7.exe -Algorithm SHA256
+Get-Content .\FormulaOCRSetup-1.1.7.exe.sha256
 ```
 
 当前公开 Release 安装程序未进行商业代码签名，Windows SmartScreen 在下载量较少时可能显示“未知发布者”。请仅从本项目 Releases 下载，并用 SHA-256 文件核对完整性。
@@ -180,7 +181,7 @@ $env:FORMULA_OCR_CONDA_ENV = "D:\anaconda3\envs\formula_ocr"
 .\build_installer.ps1
 ```
 
-`build_installer.ps1` 会先构建并自检 `dist\FormulaOCR`，再生成 `dist\installer\FormulaOCRSetup-1.1.6.exe` 和对应 SHA-256 文件。公开仓库的 `.github/workflows/release.yml` 会在推送 `v*` 标签时于干净的 Windows runner 上先运行回归测试，再根据 `requirements.txt` 重复构建流程并上传 Release 草稿资产，验证后发布；不需要把第三方 OCR 源码或模型权重提交到仓库。
+`build_installer.ps1` 会先构建并自检 `dist\FormulaOCR`，再生成 `dist\installer\FormulaOCRSetup-1.1.7.exe` 和对应 SHA-256 文件。公开仓库的 `.github/workflows/release.yml` 会在推送 `v*` 标签时于干净的 Windows runner 上先运行回归测试，再根据 `requirements.txt` 重复构建流程并上传 Release 草稿资产，验证后发布；不需要把第三方 OCR 源码或模型权重提交到仓库。
 
 打包产物会输出到：
 
@@ -218,7 +219,7 @@ CI 会合并运行四个 unittest 模块，并检查每项桌面自检的退出�
 
 性能改动、测量范围与后续改进建议见 [2026-09 优化审查记录](docs/optimization-2026-09.md)。
 
-v1.1.6 新增紧凑的更新图标和新版红点提醒，保留缩放适配、复制提示、百分比区间识别和小屏幕布局修复，详见 [界面与交互检查记录](docs/ui-review-2026-09.md) 与 [数字区间识别检查记录](docs/recognition-review-2026-09.md)。
+v1.1.7 包含紧凑的更新图标、新版红点提醒及 GitHub API 限流时的发布页备用检查，保留缩放适配、复制提示、百分比区间识别和小屏幕布局修复，详见 [界面与交互检查记录](docs/ui-review-2026-09.md) 与 [数字区间识别检查记录](docs/recognition-review-2026-09.md)。
 
 ## 开源致谢
 

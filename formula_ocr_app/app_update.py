@@ -122,6 +122,11 @@ def fetch_latest_release(
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
+        if getattr(response, "status_code", None) in {403, 429}:
+            response.close()
+            return _fetch_public_latest_release(
+                current_version, request_get=request_get
+            )
         response.raise_for_status()
         payload = response.json()
     except UpdateCheckError:
@@ -131,6 +136,45 @@ def fetch_latest_release(
             "无法连接 GitHub 检查更新，请稍后重试。"
         ) from exc
     return parse_latest_release(payload, current_version=current_version)
+
+
+def _fetch_public_latest_release(
+    current_version: str,
+    *,
+    request_get: Callable[..., Any],
+) -> ReleaseInfo:
+    """Use GitHub's official latest-tag redirect when its API is rate limited."""
+
+    response = request_get(
+        f"{RELEASES_URL}/latest",
+        timeout=(10, 20),
+        stream=True,
+        headers={"User-Agent": f"FormulaOCR/{normalize_version(current_version)}"},
+    )
+    try:
+        response.raise_for_status()
+        prefix = f"{_REPOSITORY_RELEASE_PATH}tag/"
+        release_url = _trusted_github_url(
+            response.url, label="Release 页面", required_path_prefix=prefix
+        )
+        tag_name = urlparse(release_url).path[len(prefix):]
+        latest_version = normalize_version(tag_name)
+        if "-" in latest_version:
+            raise UpdateCheckError("GitHub latest release 不是稳定正式版本。")
+        # The redirect confirms the release, not its assets or notes. Open its
+        # page on demand instead of guessing an installer download address.
+        return ReleaseInfo(
+            current_version=normalize_version(current_version),
+            latest_version=latest_version,
+            tag_name=tag_name,
+            release_name=f"FormulaOCR {latest_version}",
+            release_url=release_url,
+            installer_url="",
+            notes="更新说明和安装包可在 GitHub 发布页面查看。",
+            published_at="",
+        )
+    finally:
+        response.close()
 
 
 def _version_key(value: str) -> tuple[tuple[int, int, int], int, tuple[Any, ...]]:
