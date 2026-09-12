@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import os
 from pathlib import Path
 import sys
 import tempfile
 import time
+import traceback
 import tkinter as tk
 from tkinter import ttk
 import unittest
@@ -16,8 +17,9 @@ from unittest import mock
 from PIL import Image
 
 from formula_ocr_app import app as app_module
+from formula_ocr_app import ui_widgets
 from formula_ocr_app.app_settings import AppSettings
-from formula_ocr_app.ui_widgets import RoundedButton, RoundedChoice, ui_pixels
+from formula_ocr_app.ui_widgets import RoundedButton, RoundedChoice, ScrollableFrame, ui_pixels
 
 
 def descendants(widget: tk.Misc):
@@ -29,13 +31,17 @@ def descendants(widget: tk.Misc):
 @unittest.skipUnless(sys.platform == "win32" or os.environ.get("DISPLAY"), "requires a desktop Tk display")
 class DesktopInteractionTests(unittest.TestCase):
     @contextmanager
-    def window(self, scale: float = 1.5):
+    def window(self, scale: float = 1.5, screen: tuple[int, int] | None = None):
         app_module.enable_windows_dpi_awareness()
+        callbacks = []
 
         class ScaledApp(app_module.FormulaOCRApp):
             def _configure_styles(self):
                 self.tk.call("tk", "scaling", scale * 96 / 72)
                 super()._configure_styles()
+
+            def report_callback_exception(self, exc, value, tb):
+                callbacks.append("".join(traceback.format_exception(exc, value, tb)))
 
         with (
             tempfile.TemporaryDirectory(prefix="formulaocr-ui-test-") as scratch,
@@ -45,10 +51,9 @@ class DesktopInteractionTests(unittest.TestCase):
             mock.patch.object(app_module, "model_status_label", return_value="待下载"),
             mock.patch.object(app_module, "write_log"),
             mock.patch.object(app_module.messagebox, "showerror") as errors,
+            mock.patch.object(ui_widgets, "_monitor_work_area", return_value=ui_widgets._ScreenArea(0, 0, *screen)) if screen else nullcontext(),
         ):
             app = ScaledApp(auto_check_updates=False)
-            callbacks = []
-            app.report_callback_exception = lambda _type, value, _tb: callbacks.append(str(value))
             try:
                 app.update()
                 yield app, errors
@@ -62,6 +67,12 @@ class DesktopInteractionTests(unittest.TestCase):
         self.assertTrue(buttons)
         for button in buttons:
             with self.subTest(caption=button.text):
+                ancestor = button.master
+                while ancestor is not None:
+                    if isinstance(ancestor, ScrollableFrame):
+                        ancestor.see(button)
+                    ancestor = ancestor.master
+                window.update()
                 box = button.bbox("caption")
                 self.assertIsNotNone(box)
                 self.assertGreaterEqual(box[0], 2)
@@ -80,6 +91,13 @@ class DesktopInteractionTests(unittest.TestCase):
                         break
                     ancestor = ancestor.master
 
+    def assert_window_on_screen(self, window: tk.Misc) -> None:
+        area = ui_widgets._monitor_work_area(window)
+        self.assertGreaterEqual(window.winfo_rootx(), area.left)
+        self.assertGreaterEqual(window.winfo_rooty(), area.top)
+        self.assertLessEqual(window.winfo_rootx() + window.winfo_width(), area.right)
+        self.assertLessEqual(window.winfo_rooty() + window.winfo_height(), area.bottom)
+
     @staticmethod
     def pump(app: tk.Tk, milliseconds: int) -> None:
         until = time.monotonic() + milliseconds / 1000
@@ -92,14 +110,46 @@ class DesktopInteractionTests(unittest.TestCase):
         for scale in (1.0, 1.25, 1.5, 1.75, 2.0):
             with self.subTest(scale=scale), self.window(scale) as (app, _errors):
                 large = f"{app.winfo_width()}x{app.winfo_height()}"
+                self.assert_window_on_screen(app)
                 self.assert_buttons_fit(app)
                 width, height = app.minsize()
                 app.geometry(f"{width}x{height}")
                 self.assert_buttons_fit(app)
-                self.assertNotEqual(app.copy_latex_button.winfo_y(), app.clear_button.winfo_y())
                 self.assertGreater(app.output_text.winfo_height(), ui_pixels(app, 45))
                 app.geometry(large)
                 self.assert_buttons_fit(app)
+
+    def test_small_screen_keeps_controls_reachable_at_large_scale(self):
+        for screen, scale in (((1024, 728), 2.0), ((1366, 728), 1.5)):
+            with self.subTest(screen=screen, scale=scale), self.window(scale, screen) as (app, _errors):
+                self.assert_window_on_screen(app)
+                self.assert_buttons_fit(app)
+                self.assertTrue(app.workspace.scrollbar.winfo_ismapped())
+                app.workspace.viewport.yview_moveto(0)
+                app.focus_force()
+                app.update()
+                app.latex_edit_button.focus_set()
+                app.update()
+                self.assertGreater(app.workspace.viewport.yview()[0], 0)
+                self.assertGreaterEqual(app.latex_edit_button.winfo_rooty(), app.workspace.viewport.winfo_rooty())
+                self.assertLessEqual(
+                    app.latex_edit_button.winfo_rooty() + app.latex_edit_button.winfo_height(),
+                    app.workspace.viewport.winfo_rooty() + app.workspace.viewport.winfo_height(),
+                )
+                app.workspace.viewport.yview_moveto(0)
+                with mock.patch.object(app, "_queue_mathml_render"):
+                    app.worker_queue.put(("success", {
+                        "formula": r"[-45.67\%, 19.38\%]", "elapsed": 0.8,
+                        "image_revision": app.image_revision,
+                    }))
+                    app._poll_worker_queue()
+                app.update()
+                self.assertGreater(app.workspace.viewport.yview()[0], 0)
+                self.assertGreaterEqual(app.result_panel.winfo_rooty(), app.workspace.viewport.winfo_rooty())
+                app.show_model_manager()
+                app.update()
+                self.assert_window_on_screen(app.model_manager_window)
+                self.assert_buttons_fit(app.model_manager_window)
 
     def test_canvas_caption_uses_allocated_size_and_disabled_buttons_skip_focus(self):
         with self.window() as (app, _errors):
@@ -128,6 +178,7 @@ class DesktopInteractionTests(unittest.TestCase):
         with self.window() as (app, errors):
             app._replace_output_text(r"\frac{x}{y}")
             app.focus_force()
+            app.update()
             app.focus_latex_editor()
             app.update()
             app.copy_latex_button.event_generate("<Button-1>")
@@ -148,6 +199,8 @@ class DesktopInteractionTests(unittest.TestCase):
                     "formula": formula, "elapsed": 0.8,
                     "image_revision": app.image_revision,
                 }))
+                app.after_cancel(app.worker_poll_after_id)
+                app.worker_poll_after_id = None
                 app._poll_worker_queue()
                 app.update()
                 self.assertEqual(app.output_text.get("1.0", "end-1c"), formula)
@@ -223,7 +276,7 @@ class DesktopInteractionTests(unittest.TestCase):
             manager = app.model_manager_window
             width, height = manager.minsize()
             manager.geometry(f"{width}x{height}")
-            tree = next(item for item in manager.winfo_children() if isinstance(item, ttk.Treeview))
+            tree = next(item for item in descendants(manager) if isinstance(item, ttk.Treeview))
             tree.selection_set("MixTexZhEn")
             app.update()
             self.assert_buttons_fit(manager)
@@ -232,7 +285,7 @@ class DesktopInteractionTests(unittest.TestCase):
             self.assertIn("MixTexZhEn", details.get("1.0", tk.END))
             details.yview_moveto(1.0)
             self.assertAlmostEqual(details.yview()[1], 1.0, delta=0.01)
-            horizontal = next(item for item in manager.winfo_children() if isinstance(item, ttk.Scrollbar))
+            horizontal = next(item for item in descendants(manager) if isinstance(item, ttk.Scrollbar))
             self.assertTrue(horizontal.winfo_ismapped())
             provider = next(item for item in descendants(manager) if isinstance(item, RoundedChoice))
             provider.set("OpenDataLab / Cooper114")

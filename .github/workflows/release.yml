@@ -42,6 +42,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Run regression tests before packaging
+        shell: pwsh
+        run: |
+          python -m unittest formula_ocr_app.recognition_tests formula_ocr_app.update_tests formula_ocr_app.runtime_tests formula_ocr_app.ui_tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --yes --no-progress
@@ -61,10 +67,11 @@ jobs:
             dist/installer/FormulaOCRSetup-*.exe.sha256
           if-no-files-found: error
 
-      - name: Publish GitHub Release assets
+      - name: Upload draft GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
+          draft: true
           generate_release_notes: true
           files: |
             dist/installer/FormulaOCRSetup-*.exe

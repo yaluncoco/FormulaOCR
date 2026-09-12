@@ -140,6 +140,7 @@ try:
         RoundedChoice,
         RoundedPanel,
         ResponsiveRow,
+        ScrollableFrame,
         SlimScrollbar,
         Toast,
         WrappingLabel,
@@ -168,6 +169,7 @@ except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
         RoundedChoice,
         RoundedPanel,
         ResponsiveRow,
+        ScrollableFrame,
         SlimScrollbar,
         Toast,
         WrappingLabel,
@@ -571,9 +573,14 @@ class FormulaOCRApp(tk.Tk):
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
+        self.workspace = ScrollableFrame(self, bg=APP_BG)
+        self.workspace.grid(row=0, column=0, sticky="nsew")
+        body = self.workspace.content
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(1, weight=1)
 
-        header = tk.Frame(self, bg=APP_BG)
+        header = tk.Frame(body, bg=APP_BG)
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
         header.configure(padx=22, pady=18)
@@ -666,7 +673,7 @@ class FormulaOCRApp(tk.Tk):
         ).grid(row=1, column=0, sticky="ew", pady=(7, 0))
         self._update_model_summary()
 
-        content = tk.Frame(self, bg=APP_BG)
+        content = tk.Frame(body, bg=APP_BG)
         content.grid(row=1, column=0, sticky="nsew", padx=22, pady=(0, 14))
         content.columnconfigure(0, weight=1, uniform="panels")
         content.columnconfigure(1, weight=1, uniform="panels")
@@ -674,12 +681,33 @@ class FormulaOCRApp(tk.Tk):
 
         left_panel = RoundedPanel(content, radius=22, padding=18)
         right_panel = RoundedPanel(content, radius=22, padding=18)
+        self.result_panel = right_panel
         left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         right_panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         left = left_panel.content
         right = right_panel.content
 
-        left.rowconfigure(2, weight=1)
+        stacked_panels = None
+
+        def arrange_panels(event: tk.Event) -> None:
+            nonlocal stacked_panels
+            stacked = event.width < ui_pixels(self, 680)
+            if stacked == stacked_panels:
+                return
+            stacked_panels = stacked
+            if stacked:
+                content.columnconfigure(1, weight=0, uniform="")
+                content.rowconfigure(1, weight=1)
+                left_panel.grid(row=0, column=0, padx=0, pady=(0, 10))
+                right_panel.grid(row=1, column=0, padx=0, pady=(10, 0))
+            else:
+                content.columnconfigure(1, weight=1, uniform="panels")
+                content.rowconfigure(1, weight=0)
+                left_panel.grid(row=0, column=0, padx=(0, 10), pady=0)
+                right_panel.grid(row=0, column=1, padx=(10, 0), pady=0)
+
+        content.bind("<Configure>", arrange_panels, add="+")
+        left.rowconfigure(2, weight=1, minsize=ui_pixels(self, 180))
         left.columnconfigure(0, weight=1)
         right.rowconfigure(1, weight=1)
         right.columnconfigure(0, weight=1)
@@ -862,7 +890,7 @@ class FormulaOCRApp(tk.Tk):
 
         latex_section = tk.Frame(results_frame, bg=PANEL_BG)
         latex_section.grid(row=0, column=0, sticky="nsew", pady=(0, 12))
-        latex_section.rowconfigure(1, weight=1)
+        latex_section.rowconfigure(1, weight=1, minsize=ui_pixels(self, 100))
         latex_section.columnconfigure(0, weight=1)
         latex_header = ResponsiveRow(latex_section, bg=PANEL_BG)
         latex_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
@@ -972,7 +1000,7 @@ class FormulaOCRApp(tk.Tk):
 
         mathml_section = tk.Frame(results_frame, bg=PANEL_BG)
         mathml_section.grid(row=1, column=0, sticky="nsew")
-        mathml_section.rowconfigure(1, weight=1)
+        mathml_section.rowconfigure(1, weight=1, minsize=ui_pixels(self, 120))
         mathml_section.columnconfigure(0, weight=1)
         mathml_header = ResponsiveRow(mathml_section, bg=PANEL_BG)
         mathml_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
@@ -1022,7 +1050,7 @@ class FormulaOCRApp(tk.Tk):
         self.output_text.edit_modified(False)
 
         status_frame = tk.Frame(self, bg=APP_BG)
-        status_frame.grid(row=2, column=0, sticky="ew", padx=22, pady=(0, 14))
+        status_frame.grid(row=1, column=0, sticky="ew", padx=22, pady=(0, 14))
         status_frame.columnconfigure(0, weight=1)
 
         self.status_var = tk.StringVar(value="就绪")
@@ -1447,14 +1475,18 @@ class FormulaOCRApp(tk.Tk):
     def show_runtime_info(self) -> None:
         window = tk.Toplevel(self)
         window.title("运行环境与缓存")
-        window.geometry("700x520")
-        window.minsize(620, 440)
+        fit_window_to_screen(window, (700, 520), (620, 440))
         window.configure(bg=APP_BG)
         window.transient(self)
         window.columnconfigure(0, weight=1)
-        window.rowconfigure(1, weight=1)
+        window.rowconfigure(0, weight=1)
+        workspace = ScrollableFrame(window, bg=APP_BG)
+        workspace.grid(row=0, column=0, sticky="nsew")
+        content = workspace.content
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(1, weight=1)
 
-        header = tk.Frame(window, bg=APP_BG)
+        header = tk.Frame(content, bg=APP_BG)
         header.grid(row=0, column=0, sticky="ew", padx=22, pady=(18, 12))
         tk.Label(
             header,
@@ -1463,15 +1495,15 @@ class FormulaOCRApp(tk.Tk):
             fg=TEXT_PRIMARY,
             font=("Microsoft YaHei UI", 17, "bold"),
         ).pack(anchor=tk.W)
-        tk.Label(
+        WrappingLabel(
             header,
             text="程序运行库和用户模型是两类不同资源，下载器不会覆盖随包运行库。",
             bg=APP_BG,
             fg=TEXT_SECONDARY,
             font=("Microsoft YaHei UI", 9),
-        ).pack(anchor=tk.W, pady=(3, 0))
+        ).pack(fill=tk.X, pady=(3, 0))
 
-        body = tk.Frame(window, bg=PANEL_BG, highlightbackground=BORDER, highlightthickness=1)
+        body = tk.Frame(content, bg=PANEL_BG, highlightbackground=BORDER, highlightthickness=1)
         body.grid(row=1, column=0, sticky="nsew", padx=22, pady=(0, 12))
         body.columnconfigure(1, weight=1)
 
@@ -1501,7 +1533,7 @@ class FormulaOCRApp(tk.Tk):
                 font=("Microsoft YaHei UI", 9, "bold"),
                 anchor=tk.W,
             ).grid(row=row_index, column=0, sticky="nw", padx=(16, 12), pady=(14 if row_index == 0 else 7, 0))
-            tk.Label(
+            WrappingLabel(
                 body,
                 text=value,
                 bg=PANEL_BG,
@@ -1509,10 +1541,9 @@ class FormulaOCRApp(tk.Tk):
                 font=("Microsoft YaHei UI", 9),
                 anchor=tk.W,
                 justify=tk.LEFT,
-                wraplength=450,
             ).grid(row=row_index, column=1, sticky="ew", padx=(0, 16), pady=(14 if row_index == 0 else 7, 0))
 
-        note = tk.Label(
+        note = WrappingLabel(
             body,
             text=(
                 "说明：_internal 中的 python*.dll、*.pyd、Paddle/ONNX Runtime 和 Tk 资源是\n"
@@ -1530,7 +1561,7 @@ class FormulaOCRApp(tk.Tk):
         )
         note.grid(row=len(rows), column=0, columnspan=2, sticky="ew", padx=12, pady=(14, 14))
 
-        actions = tk.Frame(window, bg=APP_BG)
+        actions = tk.Frame(content, bg=APP_BG)
         actions.grid(row=2, column=0, sticky="e", padx=22, pady=(0, 18))
         ttk.Button(actions, text="打开用户缓存", command=self._open_model_cache).pack(side=tk.LEFT)
         ttk.Button(actions, text="关闭", command=window.destroy).pack(side=tk.LEFT, padx=(8, 0))
@@ -2005,11 +2036,13 @@ class FormulaOCRApp(tk.Tk):
             self._session_worker_finished("recognition_thread")
 
     def _schedule_worker_poll(self) -> None:
-        if self.is_destroying:
+        if self.is_destroying or self.worker_poll_after_id is not None:
             return
         self.worker_poll_after_id = self.after(100, self._poll_worker_queue)
 
     def _poll_worker_queue(self) -> None:
+        if self.worker_poll_after_id is not None:
+            self.after_cancel(self.worker_poll_after_id)
         self.worker_poll_after_id = None
         if self.is_destroying:
             return
@@ -2134,6 +2167,7 @@ class FormulaOCRApp(tk.Tk):
             elapsed = float(payload.get("elapsed", 0.0))
             self._replace_output_text(formula)
             self._update_mathml_preview()
+            self.workspace.see(self.result_panel)
             if numeric_interval_needs_retry(formula):
                 self._show_feedback(
                     "区间识别可能不完整，请核对或切换模型重试",
@@ -2158,7 +2192,7 @@ class FormulaOCRApp(tk.Tk):
         self._schedule_worker_poll()
 
     def _schedule_mathml_preview_poll(self) -> None:
-        if self.is_destroying:
+        if self.is_destroying or self.mathml_preview_poll_after_id is not None:
             return
         self.mathml_preview_poll_after_id = self.after(
             120,
@@ -2166,6 +2200,8 @@ class FormulaOCRApp(tk.Tk):
         )
 
     def _poll_mathml_preview_queue(self) -> None:
+        if self.mathml_preview_poll_after_id is not None:
+            self.after_cancel(self.mathml_preview_poll_after_id)
         self.mathml_preview_poll_after_id = None
         if self.is_destroying:
             return
@@ -2991,7 +3027,13 @@ def run_preview_self_test() -> None:
 
 
 def run_ui_self_test() -> None:
-    app = FormulaOCRApp(auto_check_updates=False)
+    callback_errors: list[str] = []
+
+    class CheckedApp(FormulaOCRApp):
+        def report_callback_exception(self, exc, value, tb):
+            callback_errors.append("".join(traceback.format_exception(exc, value, tb)))
+
+    app = CheckedApp(auto_check_updates=False)
     app.withdraw()
 
     def assert_popup_position(
@@ -3468,19 +3510,7 @@ def run_ui_self_test() -> None:
         ) != 1:
             raise RuntimeError("重复点击模型管理创建了多个窗口。")
         manager.update_idletasks()
-        model_trees = [
-            child
-            for child in manager.winfo_children()
-            if isinstance(child, ttk.Treeview)
-        ]
-        if (
-            not model_trees
-            or not model_trees[0].exists("Pix2TextMFR15")
-            or not model_trees[0].exists("LaTeX_OCR_rec")
-            or not model_trees[0].exists("MixTexZhEn")
-            or not model_trees[0].exists("UniMERNetSmallONNX")
-        ):
-            raise RuntimeError("模型管理未显示新增模型。")
+        model_trees: list[ttk.Treeview] = []
         manager_entries: list[tk.Entry] = []
         manager_filters: list[RoundedChoice] = []
         manager_quick_filters: list[ModelFilterChips] = []
@@ -3488,6 +3518,8 @@ def run_ui_self_test() -> None:
         manager_scrollbars: list[SlimScrollbar] = []
 
         def collect_manager_controls(widget: tk.Misc) -> None:
+            if isinstance(widget, ttk.Treeview):
+                model_trees.append(widget)
             if isinstance(widget, tk.Entry):
                 manager_entries.append(widget)
             if isinstance(widget, RoundedChoice):
@@ -3502,6 +3534,11 @@ def run_ui_self_test() -> None:
                 collect_manager_controls(child)
 
         collect_manager_controls(manager)
+        if not model_trees or not all(
+            model_trees[0].exists(model_id)
+            for model_id in ("Pix2TextMFR15", "LaTeX_OCR_rec", "MixTexZhEn", "UniMERNetSmallONNX")
+        ):
+            raise RuntimeError("模型管理未显示新增模型。")
         if not manager_entries or not manager_filters or not manager_quick_filters:
             raise RuntimeError("模型管理缺少搜索、供应商或快捷筛选控件。")
         if not manager_scrollbars:
@@ -3603,6 +3640,8 @@ def run_ui_self_test() -> None:
         if not runtime_windows:
             raise RuntimeError("运行环境窗口未创建。")
         runtime_windows[0].destroy()
+        if callback_errors:
+            raise RuntimeError("UI callback failed:\n" + "\n".join(callback_errors))
         write_log(f"UI self-test OK: models={len(MODEL_SPECS)}")
         _safe_console_print(f"ui-self-test-ok:{len(MODEL_SPECS)}")
     finally:

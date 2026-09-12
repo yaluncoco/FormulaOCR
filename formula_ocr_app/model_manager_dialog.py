@@ -38,6 +38,7 @@ try:
         ModelFilterChips,
         RoundedButton,
         RoundedChoice,
+        ScrollableFrame,
         SlimScrollbar,
         WrappingLabel,
         fit_window_to_screen,
@@ -76,6 +77,7 @@ except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
         ModelFilterChips,
         RoundedButton,
         RoundedChoice,
+        ScrollableFrame,
         SlimScrollbar,
         WrappingLabel,
         fit_window_to_screen,
@@ -103,10 +105,14 @@ def show_model_manager_dialog(
     window.configure(bg=APP_BG)
     window.transient(parent)
     window.columnconfigure(0, weight=1)
-    window.columnconfigure(1, weight=0)
-    window.rowconfigure(2, weight=1)
+    window.rowconfigure(0, weight=1)
+    workspace = ScrollableFrame(window, bg=APP_BG)
+    workspace.grid(row=0, column=0, sticky="nsew")
+    body = workspace.content
+    body.columnconfigure(0, weight=1)
+    body.rowconfigure(2, weight=1, minsize=ui_pixels(window, 160))
 
-    manager_header = tk.Frame(window, bg=APP_BG)
+    manager_header = tk.Frame(body, bg=APP_BG)
     manager_header.grid(row=0, column=0, sticky="ew", padx=20, pady=(16, 13))
     tk.Label(
         manager_header,
@@ -131,7 +137,7 @@ def show_model_manager_dialog(
         anchor=tk.W,
     ).pack(fill=tk.X, pady=(2, 0))
 
-    filter_bar = tk.Frame(window, bg=APP_BG)
+    filter_bar = tk.Frame(body, bg=APP_BG)
     filter_bar.grid(
         row=1,
         column=0,
@@ -202,10 +208,10 @@ def show_model_manager_dialog(
 
     columns = ("provider", "model", "size", "scenario", "state")
     tree = ttk.Treeview(
-        window,
+        body,
         columns=columns,
         show="headings",
-        height=12,
+        height=4,
         style="Model.Treeview",
     )
     headings = {
@@ -226,7 +232,7 @@ def show_model_manager_dialog(
         tree.heading(column, text=headings[column])
         tree.column(column, width=ui_pixels(window, widths[column]), minwidth=ui_pixels(window, widths[column]), anchor=tk.W)
     tree_scrollbar = SlimScrollbar(
-        window,
+        body,
         command=tree.yview,
         width=12,
         bg=APP_BG,
@@ -237,12 +243,12 @@ def show_model_manager_dialog(
     tree.configure(yscrollcommand=tree_scrollbar.set)
     tree.grid(row=2, column=0, sticky="nsew", padx=(20, 0))
     tree_scrollbar.grid(row=2, column=1, sticky="ns", padx=(0, 20))
-    tree_horizontal_scrollbar = ttk.Scrollbar(window, orient=tk.HORIZONTAL, command=tree.xview)
+    tree_horizontal_scrollbar = ttk.Scrollbar(body, orient=tk.HORIZONTAL, command=tree.xview)
     tree_horizontal_scrollbar.grid(row=3, column=0, sticky="ew", padx=(20, 0))
     tree.configure(xscrollcommand=tree_horizontal_scrollbar.set)
 
     detail = tk.Frame(
-        window,
+        body,
         bg=PANEL_BG,
         highlightbackground=BORDER,
         highlightthickness=1,
@@ -502,7 +508,7 @@ def show_model_manager_dialog(
         else:
             set_status(f"{spec.display_name} 没有可删除的用户缓存")
 
-    actions = FlowFrame(window, bg=APP_BG, align="right", gap=7)
+    actions = FlowFrame(body, bg=APP_BG, align="right", gap=7)
     actions.grid(row=5, column=0, columnspan=2, sticky="ew", padx=20, pady=18)
 
     def add_action(

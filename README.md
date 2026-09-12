@@ -130,7 +130,7 @@ python -m formula_ocr_app.app
 Windows 用户可以直接从 [GitHub Releases](https://github.com/yaluncoco/FormulaOCR/releases) 下载：
 
 ```text
-FormulaOCRSetup-1.1.4.exe
+FormulaOCRSetup-1.1.5.exe
 ```
 
 安装程序是 x64 Windows 的 Inno Setup 安装包，默认安装到当前用户目录，不需要管理员权限。安装后可以从开始菜单启动 FormulaOCR；桌面快捷方式在安装时可选。卸载时默认保留模型、设置和日志，避免重新安装后重复下载；如果确认不再需要，也可以选择同时清理 `%LOCALAPPDATA%\FormulaOCR`。
@@ -140,8 +140,8 @@ FormulaOCRSetup-1.1.4.exe
 每个 Release 同时提供 `.sha256` 校验文件。下载后可在 PowerShell 中验证：
 
 ```powershell
-Get-FileHash .\FormulaOCRSetup-1.1.4.exe -Algorithm SHA256
-Get-Content .\FormulaOCRSetup-1.1.4.exe.sha256
+Get-FileHash .\FormulaOCRSetup-1.1.5.exe -Algorithm SHA256
+Get-Content .\FormulaOCRSetup-1.1.5.exe.sha256
 ```
 
 当前公开 Release 安装程序未进行商业代码签名，Windows SmartScreen 在下载量较少时可能显示“未知发布者”。请仅从本项目 Releases 下载，并用 SHA-256 文件核对完整性。
@@ -180,7 +180,7 @@ $env:FORMULA_OCR_CONDA_ENV = "D:\anaconda3\envs\formula_ocr"
 .\build_installer.ps1
 ```
 
-`build_installer.ps1` 会先构建并自检 `dist\FormulaOCR`，再生成 `dist\installer\FormulaOCRSetup-1.1.4.exe` 和对应 SHA-256 文件。公开仓库的 `.github/workflows/release.yml` 会在推送 `v*` 标签时于干净的 Windows runner 上根据 `requirements.txt` 重复这个流程并自动上传 Release 资产；不需要把第三方 OCR 源码或模型权重提交到仓库。
+`build_installer.ps1` 会先构建并自检 `dist\FormulaOCR`，再生成 `dist\installer\FormulaOCRSetup-1.1.5.exe` 和对应 SHA-256 文件。公开仓库的 `.github/workflows/release.yml` 会在推送 `v*` 标签时于干净的 Windows runner 上先运行回归测试，再根据 `requirements.txt` 重复构建流程并上传 Release 草稿资产，验证后发布；不需要把第三方 OCR 源码或模型权重提交到仓库。
 
 打包产物会输出到：
 
@@ -218,7 +218,7 @@ CI 会合并运行四个 unittest 模块，并检查每项桌面自检的退出�
 
 性能改动、测量范围与后续改进建议见 [2026-09 优化审查记录](docs/optimization-2026-09.md)。
 
-v1.1.4 包含缩放适配、复制提示和百分比区间识别修复，详见 [界面与交互检查记录](docs/ui-review-2026-09.md) 与 [数字区间识别检查记录](docs/recognition-review-2026-09.md)。
+v1.1.5 包含缩放适配、复制提示和百分比区间识别修复，并补齐小屏幕滚动、窗口位置与不同 Tk 版本的兼容性，详见 [界面与交互检查记录](docs/ui-review-2026-09.md) 与 [数字区间识别检查记录](docs/recognition-review-2026-09.md)。
 
 ## 开源致谢
 

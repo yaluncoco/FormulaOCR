@@ -39,6 +39,7 @@ __all__ = [
     "RoundedChoice",
     "RoundedPanel",
     "ResponsiveRow",
+    "ScrollableFrame",
     "SURFACE_SUBTLE",
     "SlimScrollbar",
     "TEXT_PRIMARY",
@@ -72,7 +73,10 @@ def fit_window_to_screen(
     available_height = max(1, area.bottom - area.top - ui_pixels(window, 64))
     width = min(ui_pixels(window, size[0]), available_width)
     height = min(ui_pixels(window, size[1]), available_height)
-    window.geometry(f"{width}x{height}")
+    x = area.left + (area.right - area.left - width) // 2
+    y = area.top + max(0, (area.bottom - area.top - height) // 2 - ui_pixels(window, 16))
+    # Explicit + coordinates also allow negative monitor origins in Tk.
+    window.geometry(f"{width}x{height}+{x}+{y}")
     window.minsize(
         min(ui_pixels(window, minimum[0]), width),
         min(ui_pixels(window, minimum[1]), height),
@@ -91,9 +95,98 @@ class WrappingLabel(tk.Label):
         self.bind("<Configure>", self._resize, add="+")
 
     def _resize(self, event: tk.Event) -> None:
-        width = max(1, event.width - 2 * int(self.cget("padx")) - 4)
-        if int(self.cget("wraplength")) != width:
+        width = max(1, event.width - 2 * self.winfo_pixels(self.cget("padx")) - 4)
+        if self.winfo_pixels(self.cget("wraplength")) != width:
             self.configure(wraplength=width)
+
+
+class ScrollableFrame(tk.Frame):
+    """Keep natural control sizes reachable when a window is too short."""
+
+    def __init__(self, parent: tk.Misc, **kwargs) -> None:
+        super().__init__(parent, **kwargs)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        bg = self.cget("bg")
+        self.viewport = tk.Canvas(self, bg=bg, bd=0, highlightthickness=0, width=1, height=1)
+        self.viewport.grid(row=0, column=0, sticky="nsew")
+        self.content = tk.Frame(self.viewport, bg=bg)
+        self._window_id = self.viewport.create_window(0, 0, window=self.content, anchor="nw")
+        self.scrollbar = SlimScrollbar(self, bg=bg, command=self.viewport.yview)
+        self.viewport.configure(yscrollcommand=self.scrollbar.set, yscrollincrement=ui_pixels(self, 24))
+        self._layout_after_id: str | None = None
+        self._toplevel = self.winfo_toplevel()
+        self._bindings = {
+            sequence: self._toplevel.bind(sequence, callback, add="+")
+            for sequence, callback in (
+                ("<Configure>", self._schedule_layout),
+                ("<FocusIn>", self._focus_changed),
+                ("<MouseWheel>", self._wheel),
+                ("<Button-4>", self._wheel),
+                ("<Button-5>", self._wheel),
+            )
+        }
+        self.bind("<Destroy>", self._on_destroy, add="+")
+
+    def _contains(self, widget: tk.Misc) -> bool:
+        return str(widget).startswith(f"{self}.")
+
+    def _schedule_layout(self, event: tk.Event) -> None:
+        if (event.widget is self or self._contains(event.widget)) and self._layout_after_id is None:
+            self._layout_after_id = self.after_idle(self._layout)
+
+    def _layout(self) -> None:
+        self._layout_after_id = None
+        width = max(1, self.viewport.winfo_width())
+        height = max(self.viewport.winfo_height(), self.content.winfo_reqheight())
+        self.viewport.itemconfigure(self._window_id, width=width, height=height)
+        self.viewport.configure(scrollregion=(0, 0, width, height))
+        if height > self.viewport.winfo_height():
+            self.scrollbar.grid(row=0, column=1, sticky="ns")
+        else:
+            self.scrollbar.grid_remove()
+
+    def see(self, widget: tk.Misc) -> None:
+        if not self._contains(widget):
+            return
+        self.update_idletasks()
+        top = widget.winfo_rooty() - self.content.winfo_rooty()
+        bottom = top + widget.winfo_height()
+        view_top = self.viewport.canvasy(0)
+        view_height = self.viewport.winfo_height()
+        margin = ui_pixels(self, 24)
+        target = view_top
+        if top < view_top + margin:
+            target = top - margin
+        elif bottom > view_top + view_height - margin:
+            target = min(top - margin, bottom - view_height + margin)
+        if target != view_top:
+            self.viewport.yview_moveto(max(0, target) / max(1, self.content.winfo_height()))
+
+    def _focus_changed(self, event: tk.Event) -> None:
+        self.see(event.widget)
+
+    def _wheel(self, event: tk.Event) -> str | None:
+        if not self._contains(event.widget):
+            return None
+        # Text and Treeview class bindings already handle their own scrolling.
+        if event.widget.winfo_class() in {"Text", "Treeview", "Listbox"}:
+            return None
+        if event.num in (4, 5):
+            steps = -1 if event.num == 4 else 1
+        else:
+            steps = -int(event.delta / 120) or (-1 if event.delta > 0 else 1)
+        self.viewport.yview_scroll(steps * 3, "units")
+        return "break"
+
+    def _on_destroy(self, event: tk.Event) -> None:
+        if event.widget is not self:
+            return
+        if self._layout_after_id is not None:
+            self.after_cancel(self._layout_after_id)
+            self._layout_after_id = None
+        for sequence, binding in self._bindings.items():
+            self._toplevel.unbind(sequence, binding)
 
 
 class FlowFrame(tk.Frame):
@@ -1304,6 +1397,19 @@ class RoundedPanel(tk.Canvas):
             window=self.content,
         )
         self.bind("<Configure>", self._resize)
+        self._toplevel = self.winfo_toplevel()
+        self._content_binding = self._toplevel.bind("<Configure>", self._sync_requested_height, add="+")
+        self.bind("<Destroy>", self._on_destroy, add="+")
+
+    def _sync_requested_height(self, event: tk.Event) -> None:
+        if event.widget is self.content or str(event.widget).startswith(f"{self.content}."):
+            height = self.content.winfo_reqheight() + 2 * self.padding
+            if self.winfo_pixels(self.cget("height")) != height:
+                self.configure(height=height)
+
+    def _on_destroy(self, event: tk.Event) -> None:
+        if event.widget is self:
+            self._toplevel.unbind("<Configure>", self._content_binding)
 
     def _resize(self, event: tk.Event) -> None:
         self.delete("panel")
