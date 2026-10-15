@@ -4,6 +4,7 @@ import hashlib
 import os
 import queue
 import shutil
+import sys
 import tarfile
 import threading
 import time
@@ -814,15 +815,12 @@ class RuntimePathTests(unittest.TestCase):
             {"FORMULA_OCR_DATA_DIR": str(data_dir)},
         ):
             resolved = data_dir.resolve()
-            self.assertEqual(runtime_cache_dir(), resolved / "cache")
-            self.assertEqual(runtime_log_dir(), resolved / "logs")
+            self.assertEqual(runtime_cache_dir(), resolved / "app" / "cache")
+            self.assertEqual(runtime_log_dir(), resolved / "app" / "logs")
             self.assertEqual(
                 paddle_model_dir("PP-FormulaNet_plus-S"),
                 resolved
-                / "cache"
-                / "runtime"
-                / "paddlex"
-                / "official_models"
+                / "model"
                 / "PP-FormulaNet_plus-S",
             )
 
@@ -898,7 +896,7 @@ class RuntimePathTests(unittest.TestCase):
         ), mock.patch("sys.frozen", True, create=True):
             self.assertIsNone(recognizer._cached_model_dir())
 
-    def test_frozen_external_models_use_user_data_not_internal(self) -> None:
+    def test_frozen_external_models_use_install_model_directory(self) -> None:
         local_app_data = Path.cwd() / "_formula_ocr_local_app_data"
         self.addCleanup(shutil.rmtree, local_app_data, True)
         with mock.patch.dict(
@@ -911,10 +909,8 @@ class RuntimePathTests(unittest.TestCase):
         ), mock.patch("sys.frozen", True, create=True):
             self.assertEqual(
                 external_model_dir("Pix2TextMFR15"),
-                local_app_data.resolve()
-                / "FormulaOCR"
-                / "cache"
-                / "models"
+                Path(sys.executable).resolve().parent
+                / "model"
                 / "Pix2TextMFR15",
             )
             self.assertNotIn("_internal", str(external_model_dir("Pix2TextMFR15")))
@@ -939,7 +935,7 @@ class RuntimePathTests(unittest.TestCase):
             cache = runtime_cache_dir()
             self.assertEqual(
                 cache,
-                local_app_data.resolve() / "FormulaOCR" / "cache",
+                install_root.resolve() / "app" / "cache",
             )
             self.assertNotIn("_internal", str(cache))
 

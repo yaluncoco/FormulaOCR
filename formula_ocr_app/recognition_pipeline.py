@@ -81,7 +81,8 @@ class FormulaRecognizer:
                 self._prediction_active = True
             model_name = self.model_name
             try:
-                self._notify_model_load(model_name)
+                if self._backend is None or self._backend_model_name != model_name:
+                    self._notify_model_load(model_name)
                 backend = self._get_backend(model_name)
                 latex = clean_recognized_latex(backend.predict(image_path))
                 result = RecognitionResult(

@@ -24,7 +24,7 @@ try:
         model_user_cache_path,
         remove_model,
     )
-    from formula_ocr_app.runtime_paths import runtime_cache_dir
+    from formula_ocr_app.runtime_paths import model_root_dir
     from formula_ocr_app.ui_widgets import (
         ACCENT,
         ACCENT_DARK,
@@ -63,7 +63,7 @@ except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
         model_user_cache_path,
         remove_model,
     )
-    from runtime_paths import runtime_cache_dir
+    from runtime_paths import model_root_dir
     from ui_widgets import (
         ACCENT,
         ACCENT_DARK,
@@ -130,7 +130,7 @@ def show_model_manager_dialog(
     ).pack(fill=tk.X, pady=(3, 0))
     WrappingLabel(
         manager_header,
-        text=f"缓存目录：{runtime_cache_dir()}",
+        text=f"模型目录：{model_root_dir()}",
         bg=APP_BG,
         fg=TEXT_SECONDARY,
         font=("Microsoft YaHei UI", 8),
@@ -376,7 +376,11 @@ def show_model_manager_dialog(
         except (OSError, ValueError, webbrowser.Error) as exc:
             messagebox.showerror("无法打开上游条款", str(exc), parent=window)
 
-    def refresh() -> None:
+    model_sizes: dict[str, int] = {}
+
+    def refresh(*, rescan: bool = True) -> None:
+        if rescan:
+            model_sizes.clear()
         selected = tree.selection()
         query = manager_search_var.get()
         selected_provider = manager_provider_var.get()
@@ -405,7 +409,9 @@ def show_model_manager_dialog(
         partial_count = 0
         cached_bytes = 0
         for spec, cached in matches:
-            cached_size = model_cache_size(spec.model_id)
+            if spec.model_id not in model_sizes:
+                model_sizes[spec.model_id] = model_cache_size(spec.model_id)
+            cached_size = model_sizes[spec.model_id]
             cached_bytes += cached_size
             if cached:
                 cached_count += 1
@@ -552,15 +558,15 @@ def show_model_manager_dialog(
     trace_bindings = (
         (
             manager_search_var,
-            manager_search_var.trace_add("write", lambda *_args: refresh()),
+            manager_search_var.trace_add("write", lambda *_args: refresh(rescan=False)),
         ),
         (
             manager_provider_var,
-            manager_provider_var.trace_add("write", lambda *_args: refresh()),
+            manager_provider_var.trace_add("write", lambda *_args: refresh(rescan=False)),
         ),
         (
             manager_quick_filter_var,
-            manager_quick_filter_var.trace_add("write", lambda *_args: refresh()),
+            manager_quick_filter_var.trace_add("write", lambda *_args: refresh(rescan=False)),
         ),
     )
 

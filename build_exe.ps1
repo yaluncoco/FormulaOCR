@@ -177,7 +177,7 @@ $builtExe = Join-Path $root "dist\FormulaOCR\FormulaOCR.exe"
 if (-not (Test-Path $builtExe)) {
     throw "Built executable not found: $builtExe"
 }
-$internalDir = Join-Path $root "dist\FormulaOCR\_internal"
+$internalDir = Join-Path $root "dist\FormulaOCR\app"
 if (-not (Test-Path $internalDir)) {
     throw "PyInstaller output directory not found: $internalDir"
 }
@@ -209,5 +209,5 @@ if (
 
 Write-Host "Built: $builtExe"
 Write-Host "Package size: $buildMiB MiB"
-Write-Host "Models are downloaded from Model Management and cached under LocalAppData\FormulaOCR."
-Write-Host "Distribute the complete dist\FormulaOCR directory; the EXE depends on _internal."
+Write-Host "Models are stored beside the EXE in model; dependencies and runtime data are in app."
+Write-Host "Distribute the complete dist\FormulaOCR directory; the EXE depends on app."

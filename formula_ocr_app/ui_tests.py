@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import tkinter as tk
@@ -391,6 +392,35 @@ class DesktopInteractionTests(unittest.TestCase):
                 self.assertIn("暂无可预览", app.feedback_toast.label.cget("text"))
                 copy.assert_not_called()
                 render.assert_not_called()
+            errors.assert_not_called()
+
+    def test_runtime_dialog_stays_responsive_during_native_probe(self):
+        release = threading.Event()
+        finished = threading.Event()
+        calls = []
+
+        def slow_probe(module):
+            release.wait(3)
+            calls.append(module)
+            if len(calls) == 3:
+                finished.set()
+            return "可用"
+
+        with self.window() as (app, errors), mock.patch.object(app, "_module_status", side_effect=slow_probe):
+            try:
+                started = time.perf_counter()
+                app.show_runtime_info()
+                self.assertLess(time.perf_counter() - started, 1.0)
+                heartbeat = []
+                app.after(10, lambda: heartbeat.append(True))
+                self.pump(app, 120)
+                self.assertEqual(heartbeat, [True])
+                dialog = next(w for w in app.winfo_children() if isinstance(w, tk.Toplevel))
+                dialog.destroy()
+            finally:
+                release.set()
+                self.assertTrue(finished.wait(3))
+            self.pump(app, 120)
             errors.assert_not_called()
 
     def test_manager_remains_usable_with_long_details_at_large_scale(self):

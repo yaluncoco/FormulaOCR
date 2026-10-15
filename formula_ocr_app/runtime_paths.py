@@ -15,21 +15,25 @@ def is_frozen() -> bool:
 
 
 def runtime_cache_dir() -> Path:
-    override = _data_dir_override()
-    if override is not None:
-        return override / "cache"
-    if is_frozen():
-        return user_data_dir() / "cache"
-    return Path(__file__).resolve().parent / ".cache"
+    return user_data_dir() / "cache"
 
 
 def runtime_log_dir() -> Path:
-    override = _data_dir_override()
-    if override is not None:
-        return override / "logs"
+    return user_data_dir() / "logs"
+
+
+def installation_dir() -> Path:
     if is_frozen():
-        return user_data_dir() / "logs"
-    return Path(__file__).resolve().parent.parent / "logs"
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def storage_root() -> Path:
+    return _data_dir_override() or installation_dir()
+
+
+def model_root_dir() -> Path:
+    return storage_root() / "model"
 
 
 def paddle_runtime_cache_dir() -> Path:
@@ -37,7 +41,7 @@ def paddle_runtime_cache_dir() -> Path:
 
 
 def paddle_model_dir(model_name: str) -> Path:
-    return paddle_runtime_cache_dir() / "paddlex" / "official_models" / model_name
+    return model_root_dir() / model_name
 
 
 def bundled_paddle_model_dir(model_name: str) -> Path | None:
@@ -49,7 +53,7 @@ def bundled_paddle_model_dir(model_name: str) -> Path | None:
         roots.append(Path(meipass))
     if is_frozen():
         executable_root = Path(sys.executable).resolve().parent
-        roots.extend((executable_root / "_internal", executable_root))
+        roots.extend((executable_root / "app", executable_root / "_internal", executable_root))
     for root in roots:
         candidate = root / "models" / "paddle" / model_name
         if candidate.is_dir():
@@ -70,7 +74,7 @@ def resolve_paddle_model_dir(model_name: str) -> Path:
 
 
 def external_model_dir(model_name: str) -> Path:
-    return runtime_cache_dir() / "models" / model_name
+    return model_root_dir() / model_name
 
 
 def bundled_external_model_dir(model_name: str) -> Path | None:
@@ -82,7 +86,7 @@ def bundled_external_model_dir(model_name: str) -> Path | None:
         roots.append(Path(meipass))
     if is_frozen():
         executable_root = Path(sys.executable).resolve().parent
-        roots.extend((executable_root / "_internal", executable_root))
+        roots.extend((executable_root / "app", executable_root / "_internal", executable_root))
     for root in roots:
         candidate = root / "models" / "onnx" / model_name
         if candidate.is_dir():
@@ -357,9 +361,11 @@ def _external_user_artifact_paths(model_name: str) -> tuple[Path, ...]:
 
 
 def user_data_dir() -> Path:
-    override = _data_dir_override()
-    if override is not None:
-        return override
+    return storage_root() / "app"
+
+
+def legacy_user_data_dir() -> Path:
+    """Pre-1.2 data location, used only by the upgrade migrator."""
 
     if sys.platform == "win32":
         local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
@@ -376,12 +382,11 @@ def _data_dir_override() -> Path | None:
         return None
     override = Path(value).expanduser().resolve()
     if is_frozen() and any(
-        _path_is_within(override, root) for root in _packaged_runtime_roots()
+        _path_is_within(override, installation_dir() / name)
+        for name in ("app", "_internal", "model")
     ):
-        # A frozen build must never use its install directory or PyInstaller's
-        # extraction directory for mutable model/cache data.  In particular,
-        # do not let an accidental FORMULA_OCR_DATA_DIR override turn
-        # _internal into a download target.
+        # An override names an installation-like root, never a child resource
+        # or model directory. Using the installation root itself is supported.
         return None
     return override
 

@@ -5,6 +5,7 @@ import re
 import tempfile
 import zipfile
 from html import escape
+from functools import lru_cache
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -17,10 +18,11 @@ except ModuleNotFoundError as exc:
         raise
     from numeric_intervals import normalize_numeric_formula
 
-try:  # Primary, high-fidelity LaTeX -> MathML conversion.
+def _latex2mathml_convert(*args, **kwargs):
+    # The converter loads large symbol tables. Opening the window does not
+    # need them; import on first conversion, in the preview worker.
     from latex2mathml.converter import convert as _latex2mathml_convert
-except Exception:  # pragma: no cover - falls back to the built-in parser.
-    _latex2mathml_convert = None
+    return _latex2mathml_convert(*args, **kwargs)
 
 
 MATHML_NS = "http://www.w3.org/1998/Math/MathML"
@@ -397,6 +399,7 @@ def _prepare_latex2mathml_input(text: str) -> str:
     return text
 
 
+@lru_cache(maxsize=128)
 def latex_to_mathml(latex: str) -> str:
     """Convert LaTeX to presentation MathML.
 

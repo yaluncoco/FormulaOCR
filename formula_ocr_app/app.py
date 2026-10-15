@@ -58,6 +58,7 @@ try:
     from formula_ocr_app.numeric_intervals import numeric_interval_needs_retry
     from formula_ocr_app.recognition_pipeline import FormulaRecognizer
     from formula_ocr_app.runtime_paths import (
+        model_root_dir,
         runtime_cache_dir,
         runtime_log_dir,
     )
@@ -108,6 +109,7 @@ except ModuleNotFoundError as exc:  # Allows `python formula_ocr_app/app.py`.
     from numeric_intervals import numeric_interval_needs_retry
     from recognition_pipeline import FormulaRecognizer
     from runtime_paths import (
+        model_root_dir,
         runtime_cache_dir,
         runtime_log_dir,
     )
@@ -431,6 +433,7 @@ class FormulaOCRApp(tk.Tk):
         self.saved_settings = load_settings()
         self.accepted_model_terms = set(self.saved_settings.accepted_model_terms)
         self.current_image: Image.Image | None = None
+        self.input_preview_source: Image.Image | None = None
         self.current_image_path: Path | None = None
         self.image_revision = 0
         self.preview_photo: ImageTk.PhotoImage | None = None
@@ -1209,7 +1212,7 @@ class FormulaOCRApp(tk.Tk):
             f"{spec.display_name} 的上游使用条款需要单独确认。\n\n"
             f"许可：{spec.license_label}\n"
             f"{spec.usage_restriction}\n\n"
-            "FormulaOCR 只会从上游 release 下载模型，不会把它写入 _internal。"
+            "FormulaOCR 会从上游 release 下载模型并保存到安装目录的 model。"
             "继续表示你已阅读并接受按上游条款使用该模型。\n\n"
             f"条款页面：{spec.terms_url}"
         )
@@ -1454,7 +1457,7 @@ class FormulaOCRApp(tk.Tk):
         return True
 
     def _open_model_cache(self) -> None:
-        directory = runtime_cache_dir()
+        directory = model_root_dir()
         directory.mkdir(parents=True, exist_ok=True)
         try:
             if sys.platform == "win32":
@@ -1470,8 +1473,8 @@ class FormulaOCRApp(tk.Tk):
         if meipass:
             return Path(meipass)
         if getattr(sys, "frozen", False):
-            return Path(sys.executable).resolve().parent / "_internal"
-        return APP_ROOT.parent / "_internal"
+            return Path(sys.executable).resolve().parent / "app"
+        return APP_ROOT.parent / "app"
 
     @staticmethod
     def _module_status(module_name: str) -> str:
@@ -1523,20 +1526,21 @@ class FormulaOCRApp(tk.Tk):
         runtime_dir = self._bundled_runtime_dir()
         rows = (
             ("运行模式", "Windows 打包版" if getattr(sys, "frozen", False) else "源码运行"),
-            ("随包运行库 _internal", str(runtime_dir)),
-            ("用户模型缓存", str(runtime_cache_dir())),
+            ("程序运行库 app", str(runtime_dir)),
+            ("本地模型", str(model_root_dir())),
             ("模型目录", f"{len(MODEL_SPECS)} 个模型 / {len({item.provider for item in MODEL_SPECS})} 个供应方"),
             (
                 "Paddle Inference",
-                self._module_status("paddle-native"),
+                "正在检查…",
             ),
-            ("ONNX Runtime", self._module_status("onnxruntime")),
+            ("ONNX Runtime", "正在检查…"),
             (
                 "ONNX 模型后端",
-                "RapidLaTeXOCR / MathCraft / Pix2Text / MixTeX / UniMERNet Small 已按需加载；"
-                + self._module_status("tokenizers"),
+                "正在检查 tokenizer…",
             ),
         )
+        native_labels = {}
+        native_modules = {"Paddle Inference": "paddle-native", "ONNX Runtime": "onnxruntime", "ONNX 模型后端": "tokenizers"}
         for row_index, (label, value) in enumerate(rows):
             tk.Label(
                 body,
@@ -1546,7 +1550,7 @@ class FormulaOCRApp(tk.Tk):
                 font=("Microsoft YaHei UI", 9, "bold"),
                 anchor=tk.W,
             ).grid(row=row_index, column=0, sticky="nw", padx=(16, 12), pady=(14 if row_index == 0 else 7, 0))
-            WrappingLabel(
+            value_label = WrappingLabel(
                 body,
                 text=value,
                 bg=PANEL_BG,
@@ -1554,15 +1558,38 @@ class FormulaOCRApp(tk.Tk):
                 font=("Microsoft YaHei UI", 9),
                 anchor=tk.W,
                 justify=tk.LEFT,
-            ).grid(row=row_index, column=1, sticky="ew", padx=(0, 16), pady=(14 if row_index == 0 else 7, 0))
+            )
+            value_label.grid(row=row_index, column=1, sticky="ew", padx=(0, 16), pady=(14 if row_index == 0 else 7, 0))
+            if label in native_modules:
+                native_labels[native_modules[label]] = value_label
+
+        results: queue.Queue = queue.Queue()
+
+        def probe() -> None:
+            for module in native_labels:
+                results.put((module, self._module_status(module)))
+
+        remaining = len(native_labels)
+
+        def poll_results() -> None:
+            nonlocal remaining
+            if self.is_destroying or not window.winfo_exists():
+                return
+            while not results.empty():
+                module, status = results.get_nowait()
+                native_labels[module].configure(text=status)
+                remaining -= 1
+            if remaining:
+                self.after(80, poll_results)
+
+        threading.Thread(target=probe, daemon=True).start()
+        self.after(80, poll_results)
 
         note = WrappingLabel(
             body,
             text=(
-                "说明：_internal 中的 python*.dll、*.pyd、Paddle/ONNX Runtime 和 Tk 资源是\n"
-                "PyInstaller 程序本体的一部分，必须与 EXE 一起分发；运行时模型、断点文件和校验后的\n"
-                "模型只写入“用户模型缓存”。若需要离线模型，可在打包时显式放入 _internal/models，\n"
-                "应用会把它们当作只读随包资源。"
+                "模型统一保存在安装目录的 model。程序依赖、设置、缓存和日志位于 app。\n"
+                "升级会自动迁移旧模型；移动软件时请保留完整安装目录。"
             ),
             bg="#f5f8fc",
             fg=TEXT_SECONDARY,
@@ -1952,19 +1979,10 @@ class FormulaOCRApp(tk.Tk):
             if manual_refresh_pending and self.status_var.get() == "正在刷新 MathML 预览":
                 self.status_var.set("暂无可预览的公式")
             return False
-        try:
-            mathml = latex_to_mathml(latex)
-        except Exception as exc:
-            self._cancel_pending_mathml_render()
-            write_log(f"Failed to convert LaTeX to MathML: {exc}")
-            self._set_mathml_preview_text("MathML 转换失败")
-            if manual_refresh_pending and self.status_var.get() == "正在刷新 MathML 预览":
-                self.status_var.set("预览转换失败，请检查 LaTeX")
-            return False
         self._set_mathml_preview_text("正在渲染 MathML...")
         if manual_refresh_pending:
             self.manual_preview_token = token
-        self._queue_mathml_render(token, latex, mathml)
+        self._queue_mathml_render(token, latex, "")
         return True
 
     def _set_mathml_preview_text(self, text: str) -> None:
@@ -2300,6 +2318,10 @@ class FormulaOCRApp(tk.Tk):
         cancel_event: threading.Event,
     ) -> None:
         try:
+            if not mathml:
+                mathml = latex_to_mathml(latex)
+            if cancel_event.is_set():
+                return
             image_path = self._render_mathml_to_png(token, mathml, cancel_event)
         except Exception as exc:
             if cancel_event.is_set():
@@ -2358,9 +2380,7 @@ class FormulaOCRApp(tk.Tk):
             or self.mathml_preview_resize_after_id is not None
         ):
             return
-        self.mathml_preview_resize_after_id = self.after_idle(
-            self._update_mathml_preview_image
-        )
+        self.mathml_preview_resize_after_id = self.after(60, self._update_mathml_preview_image)
 
     def _update_mathml_preview_image(self) -> None:
         self.mathml_preview_resize_after_id = None
@@ -2539,7 +2559,7 @@ class FormulaOCRApp(tk.Tk):
             prepared = image_to_rgb(image)
             revision = self.image_revision + 1
             image_path = self.session_dir / f"input_{revision}.png"
-            prepared.save(image_path, format="PNG")
+            prepared.save(image_path, format="PNG", compress_level=1)
         except Exception as exc:
             write_log(f"Unable to prepare input image: {exc}")
             messagebox.showerror("图片加载失败", str(exc), parent=self)
@@ -2549,6 +2569,8 @@ class FormulaOCRApp(tk.Tk):
         self.clear_output(update_status=False)
         self.image_revision = revision
         self.current_image = prepared
+        self.input_preview_source = prepared.copy()
+        self.input_preview_source.thumbnail((1600, 1200), Image.Resampling.LANCZOS, reducing_gap=3.0)
         self.current_image_path = image_path
         self.preview_render_size = None
         self._update_preview()
@@ -2579,7 +2601,7 @@ class FormulaOCRApp(tk.Tk):
         render_size = (max_width, max_height)
         if self.preview_render_size == render_size:
             return
-        preview = self.current_image.copy()
+        preview = (self.input_preview_source or self.current_image).copy()
         preview.thumbnail(render_size, Image.Resampling.LANCZOS)
         self.preview_photo = ImageTk.PhotoImage(preview)
         self.preview_render_size = render_size
@@ -2592,7 +2614,7 @@ class FormulaOCRApp(tk.Tk):
             or self.preview_resize_after_id is not None
         ):
             return
-        self.preview_resize_after_id = self.after_idle(self._update_preview)
+        self.preview_resize_after_id = self.after(60, self._update_preview)
 
     def _session_worker_finished(self, attribute: str) -> None:
         current_thread = threading.current_thread()
@@ -2828,8 +2850,24 @@ class ScreenshotSelector:
 
 
 def main() -> None:
+    if "--install-storage" in sys.argv:
+        # Inno Setup must migrate the installation it is updating even if a
+        # developer/test override was inherited by the installer process.
+        os.environ.pop("FORMULA_OCR_DATA_DIR", None)
+        global CACHE_DIR, LOG_DIR, LOG_FILE
+        CACHE_DIR = runtime_cache_dir()
+        LOG_DIR = runtime_log_dir()
+        LOG_FILE = LOG_DIR / "formula_ocr.log"
     install_exception_logger()
     enable_windows_dpi_awareness()
+    if "--migrate-data" in sys.argv:
+        try:
+            _migrate_storage(force=True)
+        except Exception as exc:
+            write_log(f"Storage migration failed: {exc}")
+            _safe_console_print(str(exc), error=True)
+            raise SystemExit(1) from exc
+        return
     if "--word-mathml-self-test" in sys.argv:
         run_word_mathml_self_test()
         return
@@ -2850,8 +2888,68 @@ def main() -> None:
         return
 
     set_windows_app_id()
+    if not _prepare_storage():
+        return
     app = FormulaOCRApp()
     app.mainloop()
+
+
+def _migrate_storage(*, force: bool = False) -> None:
+    try:
+        from formula_ocr_app.storage_migration import migrate_legacy_data
+    except ModuleNotFoundError as exc:
+        if exc.name != "formula_ocr_app":
+            raise
+        from storage_migration import migrate_legacy_data
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--legacy-cache", action="append", default=[])
+    args, _unknown = parser.parse_known_args()
+    migrate_legacy_data(
+        extra_cache_roots=tuple(Path(path) for path in args.legacy_cache), force=force,
+    )
+
+
+def _prepare_storage() -> bool:
+    # Installer upgrades normally already migrated. Portable upgrades display
+    # a responsive progress window while a large cross-volume move runs.
+    if (runtime_cache_dir().parent / ".storage-v2").is_file():
+        return True
+    splash = tk.Tk()
+    splash.title("FormulaOCR")
+    splash.geometry("460x130")
+    splash.protocol("WM_DELETE_WINDOW", lambda: None)
+    tk.Label(splash, text="正在整理本地模型和运行数据，请稍候…", pady=24).pack()
+    progress = ttk.Progressbar(splash, mode="indeterminate")
+    progress.pack(fill="x", padx=30)
+    progress.start()
+    result: queue.Queue = queue.Queue()
+
+    def migrate() -> None:
+        try:
+            _migrate_storage()
+            result.put(None)
+        except Exception as exc:
+            result.put(exc)
+
+    success = False
+
+    def poll() -> None:
+        nonlocal success
+        try:
+            error = result.get_nowait()
+        except queue.Empty:
+            splash.after(80, poll)
+            return
+        success = error is None
+        if error is not None:
+            write_log(f"Storage migration failed: {error}")
+            messagebox.showerror("无法整理模型目录", f"{error}\n\n原文件已保留。请检查安装目录写入权限和磁盘空间，再重新启动。", parent=splash)
+        splash.destroy()
+
+    threading.Thread(target=migrate, daemon=True).start()
+    splash.after(80, poll)
+    splash.mainloop()
+    return success
 
 
 def enable_windows_dpi_awareness() -> None:
@@ -3727,10 +3825,10 @@ def run_runtime_self_test() -> None:
 
     if any(
         is_inside(path, bundled_dir)
-        for path in (cache_dir, paddle_dir, external_dir, mixtex_dir, unimernet_dir)
+        for path in (paddle_dir, external_dir, mixtex_dir, unimernet_dir)
     ):
         raise RuntimeError(
-            "运行时模型缓存错误地落在 _internal 中；应使用 LocalAppData\\FormulaOCR\\cache。"
+            "模型必须位于安装目录的 model 中，不能写入程序依赖目录 app。"
         )
     if len(MODEL_SPECS) < 10 or len({item.provider for item in MODEL_SPECS}) < 6:
         raise RuntimeError("模型目录或供应商目录未完整加载。")

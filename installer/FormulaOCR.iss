@@ -34,6 +34,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
+UninstallFilesDir={app}\app
 LicenseFile={#MyRepoRoot}\LICENSE
 OutputDir={#MyOutputDir}
 OutputBaseFilename=FormulaOCRSetup-{#MyAppVersion}
@@ -50,23 +51,18 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "chinesesimplified"; MessagesFile: "{#MyChineseMessages}"
 
 [CustomMessages]
-english.UninstallUserData=Also remove downloaded models, settings, cache, and logs from %%LOCALAPPDATA%%\FormulaOCR?
-chinesesimplified.UninstallUserData=是否同时删除 %%LOCALAPPDATA%%\FormulaOCR 中已下载的模型、设置、缓存和日志？
+english.UninstallUserData=Also remove downloaded models, settings, cache, and logs from this installation's model and app folders?
+chinesesimplified.UninstallUserData=是否同时删除本安装目录 model 和 app 文件夹中的模型、设置、缓存和日志？
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "{#MyBuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#MyRepoRoot}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyRepoRoot}\NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyRepoRoot}\README.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyRepoRoot}\docs\optimization-2026-09.md"; DestDir: "{app}\docs"; Flags: ignoreversion
-Source: "{#MyRepoRoot}\docs\ui-review-2026-09.md"; DestDir: "{app}\docs"; Flags: ignoreversion
-Source: "{#MyRepoRoot}\docs\recognition-review-2026-09.md"; DestDir: "{app}\docs"; Flags: ignoreversion
-
-[InstallDelete]
-Type: filesandordirs; Name: "{app}\_internal"
+Source: "{#MyBuildDir}\*"; DestDir: "{app}"; Excludes: "app\cache\*,app\logs\*,app\settings.json,app\.storage-v2,app\.migration.lock,app\.settings.json.lock,model\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyRepoRoot}\LICENSE"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "{#MyRepoRoot}\NOTICE.md"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "{#MyRepoRoot}\README.md"; DestDir: "{app}\app"; Flags: ignoreversion
+Source: "{#MyRepoRoot}\docs\*.md"; DestDir: "{app}\app\docs"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -78,6 +74,31 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 [Code]
 var
   DeleteUserDataOnUninstall: Boolean;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ExitCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    { Never delete _internal before moving any offline models it contains. }
+    if not Exec(ExpandConstant('{app}\{#MyAppExeName}'), '--migrate-data --install-storage',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+      RaiseException('Unable to migrate FormulaOCR data. Original files were retained.');
+    if ExitCode <> 0 then
+      RaiseException('Model migration failed. Original files were retained; see app\logs.');
+    DelTree(ExpandConstant('{app}\_internal'), True, True, True);
+    DeleteFile(ExpandConstant('{app}\LICENSE'));
+    DeleteFile(ExpandConstant('{app}\NOTICE.md'));
+    DeleteFile(ExpandConstant('{app}\README.md'));
+    if FileExists(ExpandConstant('{app}\app\unins000.exe')) then
+    begin
+      DeleteFile(ExpandConstant('{app}\unins000.exe'));
+      DeleteFile(ExpandConstant('{app}\unins000.dat'));
+      DeleteFile(ExpandConstant('{app}\unins000.msg'));
+    end;
+  end;
+end;
 
 function InitializeUninstall(): Boolean;
 begin
@@ -94,5 +115,8 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if (CurUninstallStep = usPostUninstall) and DeleteUserDataOnUninstall then
-    DelTree(ExpandConstant('{localappdata}\FormulaOCR'), True, True, True);
+  begin
+    DelTree(ExpandConstant('{app}\model'), True, True, True);
+    DelTree(ExpandConstant('{app}\app'), True, True, True);
+  end;
 end;

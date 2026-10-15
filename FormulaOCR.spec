@@ -224,7 +224,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    contents_directory='_internal',
+    contents_directory='app',
     **exe_options,
 )
 coll = COLLECT(

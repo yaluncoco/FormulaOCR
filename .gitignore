@@ -14,6 +14,8 @@ env/
 formula_ocr_app/.cache/
 cache/
 logs/
+app/
+model/
 *.log
 
 # PyInstaller/build outputs

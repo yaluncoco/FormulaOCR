@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import errno
+import os
 import queue
 import tempfile
 import threading
@@ -19,6 +21,170 @@ from formula_ocr_app.mathcraft_recognizer import _generate_formula_tokens
 from formula_ocr_app.model_api import ModelDownloadCancelled
 from formula_ocr_app.rapid_recognizer import _decode_tokens
 from formula_ocr_app.recognition_pipeline import FormulaRecognizer
+
+
+class StorageMigrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from formula_ocr_app import runtime_paths, storage_migration
+        self.paths = runtime_paths
+        self.migration = storage_migration
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name) / "installed"
+        self.legacy = Path(temporary.name) / "profile"
+        for patch in (
+            mock.patch.dict(os.environ, {"FORMULA_OCR_DATA_DIR": ""}),
+            mock.patch.object(runtime_paths, "installation_dir", return_value=self.root),
+            mock.patch.object(storage_migration, "installation_dir", return_value=self.root),
+            mock.patch.object(storage_migration, "legacy_user_data_dir", return_value=self.legacy),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def write(self, path: Path, content: bytes = b"model") -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        return path
+
+    def test_upgrade_moves_models_settings_and_partial_downloads_once(self) -> None:
+        old = self.legacy / "cache"
+        self.write(old / "runtime/paddlex/official_models/Paddle/inference.pdiparams")
+        self.write(old / "models/Onnx/encoder.onnx")
+        self.write(old / "models/.downloads/Onnx/decoder.part", b"partial")
+        self.write(self.legacy / "settings.json", b'{"model_id":"RapidLaTeXOCR"}')
+        self.write(self.legacy / "logs/old.log")
+        self.write(self.root / "_internal/models/paddle/Bundled/inference.json")
+        self.migration.migrate_legacy_data()
+        for name in ("Paddle/inference.pdiparams", "Onnx/encoder.onnx", "Bundled/inference.json"):
+            self.assertEqual((self.root / "model" / name).read_bytes(), b"model")
+        self.assertEqual((self.root / "model/.downloads/Onnx/decoder.part").read_bytes(), b"partial")
+        self.assertTrue((self.root / "app/settings.json").is_file())
+        self.assertFalse(self.legacy.exists())
+        with mock.patch.object(self.migration, "_merge") as merge:
+            self.migration.migrate_legacy_data()
+        merge.assert_not_called()
+
+    def test_conflict_preserves_both_files_and_identical_copy_is_removed(self) -> None:
+        source = self.legacy / "cache/models/Onnx"
+        self.write(source / "encoder.onnx", b"old")
+        self.write(source / "decoder.onnx", b"same")
+        self.write(self.root / "model/Onnx/encoder.onnx", b"new")
+        self.write(self.root / "model/Onnx/decoder.onnx", b"same")
+        self.migration.migrate_legacy_data()
+        self.assertEqual((self.root / "model/Onnx/encoder.onnx").read_bytes(), b"new")
+        backups = list((self.root / "app/migration-conflicts").rglob("encoder.onnx"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), b"old")
+        self.assertFalse(source.exists())
+
+    def test_failed_cross_volume_copy_keeps_original_and_can_retry(self) -> None:
+        source = self.write(self.legacy / "cache/models/Onnx/model.bin")
+        with (
+            mock.patch.object(Path, "rename", side_effect=OSError(errno.EXDEV, "cross volume")),
+            mock.patch.object(self.migration.shutil, "copy2", side_effect=OSError("disk full")),
+        ):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                self.migration.migrate_legacy_data()
+        self.assertEqual(source.read_bytes(), b"model")
+        self.assertFalse((self.root / "app/.storage-v2").exists())
+        self.assertFalse(list(self.root.rglob(".migration-*")))
+        self.migration.migrate_legacy_data()
+        self.assertFalse(source.exists())
+        self.assertEqual((self.root / "model/Onnx/model.bin").read_bytes(), b"model")
+
+    def test_cross_volume_move_verifies_copy_before_removing_source(self) -> None:
+        source = self.write(self.legacy / "cache/models/Onnx/model.bin")
+        with mock.patch.object(Path, "rename", side_effect=OSError(errno.EXDEV, "cross volume")):
+            self.migration.migrate_legacy_data()
+        self.assertFalse(source.exists())
+        self.assertEqual((self.root / "model/Onnx/model.bin").read_bytes(), b"model")
+
+    def test_corrupted_cross_volume_copy_preserves_original(self) -> None:
+        source = self.write(self.legacy / "cache/models/Onnx/model.bin")
+
+        def corrupt(_source, staged):
+            staged.write_bytes(b"wrong")
+
+        with (
+            mock.patch.object(Path, "rename", side_effect=OSError(errno.EXDEV, "cross volume")),
+            mock.patch.object(self.migration.shutil, "copy2", side_effect=corrupt),
+        ):
+            with self.assertRaises(OSError):
+                self.migration.migrate_legacy_data()
+        self.assertEqual(source.read_bytes(), b"model")
+        self.assertFalse((self.root / "model/Onnx/model.bin").exists())
+
+    def test_override_does_not_move_real_profile_models(self) -> None:
+        original = self.write(self.legacy / "cache/models/Onnx/model.bin")
+        override = self.root / "test-data"
+        with mock.patch.dict(os.environ, {"FORMULA_OCR_DATA_DIR": str(override)}):
+            self.migration.migrate_legacy_data()
+            self.assertEqual(self.paths.model_root_dir(), override.resolve() / "model")
+            self.assertEqual(self.paths.runtime_cache_dir(), override.resolve() / "app/cache")
+        self.assertTrue(original.exists())
+
+    def test_explicit_source_cache_is_moved_after_initial_upgrade(self) -> None:
+        self.migration.migrate_legacy_data()
+        extra = self.legacy / "source/.cache"
+        original = self.write(extra / "models/Onnx/model.bin")
+        self.migration.migrate_legacy_data(extra_cache_roots=(extra,))
+        self.assertFalse(original.exists())
+        self.assertTrue((self.root / "model/Onnx/model.bin").exists())
+
+    def test_linked_old_cache_never_moves_unrelated_files(self) -> None:
+        outside = self.write(self.legacy / "unrelated/model.bin")
+        linked = self.legacy / "cache/models/Linked"
+        linked.parent.mkdir(parents=True)
+        try:
+            linked.symlink_to(outside.parent, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        with self.assertRaises(OSError):
+            self.migration.migrate_legacy_data()
+        self.assertEqual(outside.read_bytes(), b"model")
+        self.assertFalse((self.root / "app/.storage-v2").exists())
+
+
+class InferenceSchedulingTests(unittest.TestCase):
+    def test_sessions_limit_threads_and_disable_idle_spinning(self) -> None:
+        from formula_ocr_app import onnx_runtime
+        with tempfile.TemporaryDirectory() as temporary:
+            model = Path(temporary) / "model.onnx"
+            model.write_bytes(b"placeholder")
+            runtime = mock.Mock()
+            runtime.get_available_providers.return_value = ["CPUExecutionProvider"]
+            with (
+                mock.patch.dict(os.environ, {"FORMULA_OCR_ONNX_THREADS": ""}),
+                mock.patch.object(onnx_runtime.os, "cpu_count", return_value=32),
+            ):
+                onnx_runtime.create_inference_session(runtime, model)
+            options = runtime.SessionOptions.return_value
+            self.assertEqual(options.intra_op_num_threads, 4)
+            self.assertEqual(options.inter_op_num_threads, 1)
+            self.assertEqual(options.add_session_config_entry.call_args_list, [
+                mock.call("session.intra_op.allow_spinning", "0"),
+                mock.call("session.inter_op.allow_spinning", "0"),
+            ])
+
+    def test_explicit_thread_limit_and_single_core_are_supported(self) -> None:
+        from formula_ocr_app import onnx_runtime
+        with mock.patch.dict(os.environ, {"FORMULA_OCR_ONNX_THREADS": "2"}):
+            self.assertEqual(onnx_runtime._thread_count(), 2)
+        with (
+            mock.patch.dict(os.environ, {"FORMULA_OCR_ONNX_THREADS": ""}),
+            mock.patch.object(onnx_runtime.os, "cpu_count", return_value=1),
+        ):
+            self.assertEqual(onnx_runtime._thread_count(), 1)
+
+    def test_warm_recognition_reuses_backend_without_revalidating_files(self) -> None:
+        backend = mock.Mock()
+        backend.predict.return_value = "x"
+        recognizer = FormulaRecognizer(model_name="RapidLaTeXOCR", recognizer_factory=lambda _: backend)
+        self.addCleanup(recognizer.close)
+        with mock.patch.object(recognizer, "_notify_model_load") as notify:
+            self.assertEqual(recognizer.predict("image.png"), "x")
+            self.assertEqual(recognizer.predict("image.png"), "x")
+        notify.assert_called_once_with("RapidLaTeXOCR")
 
 
 class RuntimeStateTests(unittest.TestCase):

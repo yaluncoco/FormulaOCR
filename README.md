@@ -62,7 +62,8 @@ formula_ocr_app/
   mixtex_recognizer.py     # MixTeX merged-decoder ONNX Runtime 后端
   unimernet_onnx_model_downloader.py # UniMERNet Small ONNX 固定 revision 下载与校验
   unimernet_onnx_recognizer.py # UniMERNet Small 首次/缓存 decoder 后端
-  runtime_paths.py        # 用户缓存、日志和按需下载模型路径
+  runtime_paths.py        # 安装目录内 model / app 路径
+  storage_migration.py    # 旧缓存迁移、跨卷校验和失败重试
   formula_formats.py      # LaTeX/MathML/AsciiMath/Typst/Word 格式转换
   word_clipboard.py       # Word 兼容剪贴板写入
   word_clipboard_tests.py # Word MathML 回归测试
@@ -108,41 +109,45 @@ python -m formula_ocr_app.app
 安装包不内置大体积模型。请先在“模型管理”中下载所需模型，再从主界面下拉框选择；下载时状态栏显示实时百分比和已下载体积。Paddle 归档使用大小、CRC32 与安全解压校验；Hugging Face、RapidAI 和 ZIP/ONNX 模型使用固定 revision 或发布文件的 SHA-256 清单校验。所有下载器共用断点续传、原子替换和跨进程锁，后续启动无需重复下载：
 
 ```text
-%LOCALAPPDATA%\FormulaOCR\cache\runtime\paddlex\official_models
-%LOCALAPPDATA%\FormulaOCR\cache\runtime\paddlex\official_models\LaTeX_OCR_rec
-%LOCALAPPDATA%\FormulaOCR\cache\models\RapidLaTeXOCR
-%LOCALAPPDATA%\FormulaOCR\cache\models\MathCraftFormula
-%LOCALAPPDATA%\FormulaOCR\cache\models\Pix2TextMFR15
-%LOCALAPPDATA%\FormulaOCR\cache\models\MixTexZhEn
-%LOCALAPPDATA%\FormulaOCR\cache\models\UniMERNetSmallONNX
+安装目录/
+  FormulaOCR.exe
+  model/                    # 所有已下载模型与续传文件
+    PP-FormulaNet_plus-S/
+    RapidLaTeXOCR/
+    ...
+  app/                      # 运行库、卸载程序和辅助文件
+    settings.json
+    cache/
+    logs/
+    docs/
 ```
 
-这里的缓存策略与 LaTeXSnipper 的思路一致，但要区分两类目录：`dist\FormulaOCR\_internal` 是 PyInstaller 目录版的随包运行库目录，适合放程序代码、DLL 或明确随安装包分发的只读模型；它不适合运行时下载，因为升级覆盖和安装目录权限限制都可能让下载失败。LaTeXSnipper 的 Windows 包本身也是 `onedir`，安装时会带上基础 `_internal`；它另外下载的是独立 OCR 依赖层和用户模型，并不是在缺少 `_internal` 时补齐主程序。FormulaOCR 将运行时模型放在上面的用户数据目录，下载临时文件、校验和安装也都在那里完成。这样既可以发布一个不带模型的安装包，也可以在打包时把经过授权的离线模型放进随包资源而不污染用户缓存。
+从 v1.2.0 起，模型统一保存在 EXE 同级的 `model`，依赖、设置、日志和临时文件统一保存在 `app`。安装到可写目录即可使用，不再默认向用户目录新建 FormulaOCR 缓存。升级安装会先移动旧版 `%LOCALAPPDATA%\FormulaOCR` 下的模型、设置和日志，以及旧 `_internal/models` 中的离线模型，成功后才清理旧运行库；便携包首次启动也会迁移。迁移失败会保留尚未完成的原文件供重试，不会自动重新下载；同名不同内容保存在 `app/migration-conflicts`。卸载默认保留模型与运行数据。
 
-冻结版即使设置了 `FORMULA_OCR_DATA_DIR`，只要该路径落在 EXE 或 `_internal` 内，程序也会拒绝把它作为可写缓存并回退到 `%LOCALAPPDATA%\FormulaOCR\cache`；这避免了误把 PyInstaller 运行库目录当成模型下载目录。
+源码运行采用仓库根目录的同一 `model` / `app` 布局，并自动迁移 `formula_ocr_app/.cache`。如需手动迁移其他旧缓存，可运行 `FormulaOCR.exe --migrate-data --legacy-cache "旧缓存目录"`。`FORMULA_OCR_DATA_DIR` 可显式指定另一个数据根目录，其下同样使用 `model` / `app`；测试使用此覆盖时不会读取或迁移真实用户目录。该变量应指向根目录，不能指向安装目录内的 `app`、`model` 或 `_internal`。
 
-当前目录中的模型来源为：百度飞桨模型生态中的 PP-FormulaNet 系列与 UniMERNet、PaddlePaddle 官方 Hugging Face 的 `LaTeX_OCR_rec`、OpenDataLab/Cooper114 的量化 `UniMERNet Small ONNX`、RapidAI 社区的 RapidLaTeXOCR、SakuraMathcraft 的 MathCraft Formula ONNX，以及 Breezedeus 的 Pix2Text MFR 1.5 ONNX。PP-FormulaNet/UniMERNet 仍沿用现有 `paddlex/official_models` 用户缓存路径以兼容旧版本，但推理直接加载 `libpaddle`，不会导入 PaddleOCR/PaddleX。`LaTeX_OCR_rec` 固定到 Hugging Face revision `563fb029dfdf5fc847d0677f3870039960e3a801`，四个推理文件逐文件验证 SHA-256；RapidLaTeXOCR 的四个官方 release 文件、MathCraft ZIP 内文件、Pix2Text 固定 revision 的八个文件和 UniMERNet Small ONNX 固定 revision 的六个文件也均记录并验证 SHA-256；Paddle 归档则按官方归档大小和 CRC32 校验。识别时只调用主界面明确选择的模型，不会跨供应商自动切换。UniMERNet Small ONNX 的原始模型来源为 `wanderkid/unimernet_small`，转换仓库为 `Cooper114/unimernet-onnx`，模型卡标注 Apache-2.0。
+当前目录中的模型来源为：百度飞桨模型生态中的 PP-FormulaNet 系列与 UniMERNet、PaddlePaddle 官方 Hugging Face 的 `LaTeX_OCR_rec`、OpenDataLab/Cooper114 的量化 `UniMERNet Small ONNX`、RapidAI 社区的 RapidLaTeXOCR、SakuraMathcraft 的 MathCraft Formula ONNX，以及 Breezedeus 的 Pix2Text MFR 1.5 ONNX。PP-FormulaNet/UniMERNet 的旧 `paddlex/official_models` 缓存会迁移到 `model`；推理直接加载 `libpaddle`，不会导入 PaddleOCR/PaddleX。`LaTeX_OCR_rec` 固定到 Hugging Face revision `563fb029dfdf5fc847d0677f3870039960e3a801`，四个推理文件逐文件验证 SHA-256；RapidLaTeXOCR 的四个官方 release 文件、MathCraft ZIP 内文件、Pix2Text 固定 revision 的八个文件和 UniMERNet Small ONNX 固定 revision 的六个文件也均记录并验证 SHA-256；Paddle 归档则按官方归档大小和 CRC32 校验。识别时只调用主界面明确选择的模型，不会跨供应商自动切换。UniMERNet Small ONNX 的原始模型来源为 `wanderkid/unimernet_small`，转换仓库为 `Cooper114/unimernet-onnx`，模型卡标注 Apache-2.0。
 当前目录还提供 MixTeX 官方 `MixTeX-v3.2.4` 可选模型。它使用官方 `MixTeX.zip` 中的 `encoder_model.onnx`、`decoder_model_merged.onnx` 和 tokenizer 文件，ZIP 大小为 294,025,378 字节，按 SHA-256 `734088e8c3ac6d0ebf02b3054ed0cdde7d8be2eb57c33b8f049a66d05e026750` 校验。MixTeX 上游条款标注 AGPL-3.0，并声明基于该模型的衍生品不得用于商业用途；FormulaOCR 首次下载/使用前会在界面提示并记录条款确认。若你的软件或离线包有商业分发计划，请不要分发 MixTeX 权重，或先取得上游书面授权。
 
-每次识别只调用主界面当前选择的一个模型；程序不会因识别结果自动切换模型，也不会隐式下载 M、L 或其他候选模型。源码运行时仍使用 `formula_ocr_app/.cache`。可以通过 `FORMULA_OCR_DATA_DIR` 环境变量指定其他数据目录。
+每次识别只调用主界面当前选择的一个模型；程序不会因识别结果自动切换模型，也不会隐式下载 M、L 或其他候选模型。源码运行和安装版使用相同的目录规则。
 
 ## 下载与安装
 
 Windows 用户可以直接从 [GitHub Releases](https://github.com/yaluncoco/FormulaOCR/releases) 下载：
 
 ```text
-FormulaOCRSetup-1.1.7.exe
+FormulaOCRSetup-1.2.0.exe
 ```
 
-安装程序是 x64 Windows 的 Inno Setup 安装包，默认安装到当前用户目录，不需要管理员权限。安装后可以从开始菜单启动 FormulaOCR；桌面快捷方式在安装时可选。卸载时默认保留模型、设置和日志，避免重新安装后重复下载；如果确认不再需要，也可以选择同时清理 `%LOCALAPPDATA%\FormulaOCR`。
+安装程序是 x64 Windows 的 Inno Setup 安装包，默认安装到当前用户目录，不需要管理员权限。安装后可以从开始菜单启动 FormulaOCR；桌面快捷方式在安装时可选。卸载时默认保留模型、设置和日志，避免重新安装后重复下载；如果确认不再需要，也可以选择同时清理安装目录中的 `model` 与 `app` 运行数据。
 
-安装包不包含大体积模型权重。第一次使用某个模型时，程序会从模型管理中的官方地址下载并校验模型，下载进度和断点保存在 `%LOCALAPPDATA%\FormulaOCR\cache`。这样更新程序时无需重新打包或覆盖本地模型。
+安装包不包含大体积模型权重。第一次使用某个模型时，程序会从模型管理中的官方地址下载并校验模型，模型与续传文件保存在安装目录的 `model`。这样更新程序时无需重新打包或覆盖本地模型。
 
 每个 Release 同时提供 `.sha256` 校验文件。下载后可在 PowerShell 中验证：
 
 ```powershell
-Get-FileHash .\FormulaOCRSetup-1.1.7.exe -Algorithm SHA256
-Get-Content .\FormulaOCRSetup-1.1.7.exe.sha256
+Get-FileHash .\FormulaOCRSetup-1.2.0.exe -Algorithm SHA256
+Get-Content .\FormulaOCRSetup-1.2.0.exe.sha256
 ```
 
 当前公开 Release 安装程序未进行商业代码签名，Windows SmartScreen 在下载量较少时可能显示“未知发布者”。请仅从本项目 Releases 下载，并用 SHA-256 文件核对完整性。
@@ -181,7 +186,7 @@ $env:FORMULA_OCR_CONDA_ENV = "D:\anaconda3\envs\formula_ocr"
 .\build_installer.ps1
 ```
 
-`build_installer.ps1` 会先构建并自检 `dist\FormulaOCR`，再生成 `dist\installer\FormulaOCRSetup-1.1.7.exe` 和对应 SHA-256 文件。公开仓库的 `.github/workflows/release.yml` 会在推送 `v*` 标签时于干净的 Windows runner 上先运行回归测试，再根据 `requirements.txt` 重复构建流程并上传 Release 草稿资产，验证后发布；不需要把第三方 OCR 源码或模型权重提交到仓库。
+`build_installer.ps1` 会先构建并自检 `dist\FormulaOCR`，再生成 `dist\installer\FormulaOCRSetup-1.2.0.exe` 和对应 SHA-256 文件。公开仓库的 `.github/workflows/release.yml` 会在推送 `v*` 标签时于干净的 Windows runner 上先运行回归测试，再根据 `requirements.txt` 重复构建流程并上传 Release 草稿资产，验证后发布；不需要把第三方 OCR 源码或模型权重提交到仓库。
 
 打包产物会输出到：
 
@@ -193,9 +198,9 @@ dist/FormulaOCR/
 
 打包脚本不会再把本机模型缓存复制进 `dist/`，因此发布包体积更小，但用户首次识别时需要联网下载所选模型。
 
-如需制作离线包，可将包含各模型完整推理文件的父目录设置到 `FORMULA_OCR_BUNDLED_PADDLE_MODELS` 后再打包；脚本会把其中的模型放到 `_internal\models\paddle\<模型名>`，程序优先读取随包模型，并仍把新下载内容写入用户数据目录。由于全部 Paddle 模型约 4GB 以上，这个选项默认关闭。
+如需制作离线包，可将包含各模型完整推理文件的父目录设置到 `FORMULA_OCR_BUNDLED_PADDLE_MODELS` 后再打包；脚本将模型装入 `app\models\paddle\<模型名>`，安装迁移后统一存入 `model\<模型名>`。由于全部 Paddle 模型约 4GB 以上，这个选项默认关闭。
 
-ONNX 模型也支持可选的只读随包方式：将 `RapidLaTeXOCR`、`MathCraftFormula`、`Pix2TextMFR15`、`UniMERNetSmallONNX` 或已获授权的 `MixTexZhEn` 子目录放在 `FORMULA_OCR_BUNDLED_ONNX_MODELS` 指定的父目录中，再运行打包脚本；完整文件会放到 `_internal\models\onnx\<模型名>`。程序会先使用已校验的用户缓存，再使用已校验的随包模型，最后才下载。运行时下载不会改写 `_internal`。MixTeX 仍受其上游非商业条款约束，默认不应随商业安装包分发。
+ONNX 模型也支持可选的只读随包方式：将 `RapidLaTeXOCR`、`MathCraftFormula`、`Pix2TextMFR15`、`UniMERNetSmallONNX` 或已获授权的 `MixTexZhEn` 子目录放在 `FORMULA_OCR_BUNDLED_ONNX_MODELS` 指定的父目录中，再运行打包脚本；完整文件先放到 `app\models\onnx\<模型名>`，安装迁移后统一存入 `model\<模型名>`；程序继续校验模型完整性，复用已有文件。MixTeX 仍受其上游非商业条款约束，默认不应随商业安装包分发。
 
 ## 测试
 
@@ -219,7 +224,7 @@ CI 会合并运行四个 unittest 模块，并检查每项桌面自检的退出�
 
 性能改动、测量范围与后续改进建议见 [2026-09 优化审查记录](docs/optimization-2026-09.md)。
 
-v1.1.7 包含紧凑的更新图标、新版红点提醒及 GitHub API 限流时的发布页备用检查，保留缩放适配、复制提示、百分比区间识别和小屏幕布局修复，详见 [界面与交互检查记录](docs/ui-review-2026-09.md) 与 [数字区间识别检查记录](docs/recognition-review-2026-09.md)。
+v1.2.0 新增统一存储和旧模型自动迁移、ONNX 线程控制、后台预览转换及图片重绘优化，详见 [本次验证记录](docs/storage-performance-2026-10.md)。此前版本包含紧凑的更新图标、新版红点提醒及 GitHub API 限流时的发布页备用检查，保留缩放适配、复制提示、百分比区间识别和小屏幕布局修复，详见 [界面与交互检查记录](docs/ui-review-2026-09.md) 与 [数字区间识别检查记录](docs/recognition-review-2026-09.md)。
 
 ## 开源致谢
 

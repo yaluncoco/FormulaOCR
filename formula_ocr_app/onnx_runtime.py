@@ -36,6 +36,10 @@ def create_inference_session(
     if threads is not None:
         options.intra_op_num_threads = threads
         options.inter_op_num_threads = 1
+    # Encoder/decoder sessions coexist. Idle spinning in every session can
+    # occupy the CPU while Tk or another session is trying to do useful work.
+    options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    options.add_session_config_entry("session.inter_op.allow_spinning", "0")
 
     return onnxruntime.InferenceSession(
         str(path),
@@ -97,6 +101,4 @@ def _thread_count() -> int | None:
     raw_value = os.environ.get("FORMULA_OCR_ONNX_THREADS", "").strip()
     if raw_value.isdigit():
         return max(1, int(raw_value))
-    # Leave ONNX Runtime's own scheduler in control by default. Users with
-    # constrained systems can set the environment variable explicitly.
-    return None
+    return max(1, min(4, (os.cpu_count() or 2) // 2))
